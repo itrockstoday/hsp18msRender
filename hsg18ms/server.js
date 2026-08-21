@@ -4,21 +4,27 @@ const app = express();
 
 app.use(express.json());
 
+// Explicitly configure Port 465 + SSL to bypass Render outbound blocks
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true, // Requires SSL connection
   auth: {
     user: process.env.GMAIL_USER,
     pass: process.env.GOOGLE_APP_PASS
-  }
+  },
+  connectionTimeout: 10000, // 10 seconds timeout limit
+  greetingTimeout: 5000,
+  socketTimeout: 10000
 });
 
-// Endpoint route must match Notehub Route URL path exactly
+// Endpoint matching Notehub Route
 app.post('/notehub-webhook', async (req, res) => {
   console.log("Incoming Notehub Payload:", JSON.stringify(req.body));
 
   const payload = req.body.body || req.body;
   const event = payload.event;
-  const lat = (payload.lat || 0).toFixed(5); // 5 decimals = 1m coordinate precision
+  const lat = (payload.lat || 0).toFixed(5);
   const lon = (payload.lon || 0).toFixed(5);
 
   const mapsUrl = `https://maps.google.com/?q=${lat},${lon}`;
@@ -35,6 +41,11 @@ app.post('/notehub-webhook', async (req, res) => {
     smsSubject = "WARNING";
     smsBody = `Device moved!\nGrid: ${lat}, ${lon}\nReply with 2FA PIN within 30s.\nNav: ${mapsUrl}`;
   } 
+  else if (event === "vehicle_tilt_warning") {
+    const orientation = payload.orientation || "Tilted";
+    smsSubject = "CRITICAL TILT";
+    smsBody = `Vehicle Rollover/Tilt Detected (${orientation})!\nGrid: ${lat}, ${lon}\nNav: ${mapsUrl}`;
+  }
   else if (event === "security_breach") {
     smsSubject = "ALERT";
     smsBody = `The device is moving! 2FA Unverified.\nGrid: ${lat}, ${lon}\nGoogle: ${mapsUrl}\nWaze: ${wazeUrl}`;
@@ -42,13 +53,7 @@ app.post('/notehub-webhook', async (req, res) => {
   else if (event === "tracking_update") {
     smsSubject = "TRACKING";
     smsBody = `The device is moving!\nUpdated Grid: ${lat}, ${lon}\nNav: ${mapsUrl}`;
-  } 
-  else if (event === "vehicle_tilt_warning") {
-    const orientation = payload.orientation || "Tilted";
-    smsSubject = "CRITICAL TILT";
-    smsBody = `Vehicle Rollover/Tilt Detected (${orientation})!\nGrid: ${lat}, ${lon}\nNav: ${mapsUrl}`;
-  }
-  else {
+  } else {
     return res.status(200).json({ status: "ignored" });
   }
 
