@@ -12,12 +12,13 @@ const transporter = nodemailer.createTransport({
   }
 });
 
+// Endpoint route must match Notehub Route URL path exactly
 app.post('/notehub-webhook', async (req, res) => {
   console.log("Incoming Notehub Payload:", JSON.stringify(req.body));
 
   const payload = req.body.body || req.body;
   const event = payload.event;
-  const lat = (payload.lat || 0).toFixed(5); // 5 decimal places = 1-meter precision
+  const lat = (payload.lat || 0).toFixed(5); // 5 decimals = 1m coordinate precision
   const lon = (payload.lon || 0).toFixed(5);
 
   const mapsUrl = `https://maps.google.com/?q=${lat},${lon}`;
@@ -53,7 +54,7 @@ app.post('/notehub-webhook', async (req, res) => {
       text: smsBody
     });
 
-    console.log(`[SMS DISPATCH] Sent '${event}' notification to ${process.env.TARGET_SMS_EMAIL}`);
+    console.log(`[SMS DISPATCH] Delivered '${event}' alert to ${process.env.TARGET_SMS_EMAIL}`);
     return res.status(200).json({ status: "success", event: event });
   } catch (err) {
     console.error("SMS Delivery Failed:", err);
@@ -62,4 +63,4 @@ app.post('/notehub-webhook', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Render Webhook Active on Port ${PORT}`));
+app.listen(PORT, () => console.log(`Render Webhook running on port ${PORT}`));
