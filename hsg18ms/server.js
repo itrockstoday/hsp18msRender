@@ -1,81 +1,65 @@
 const express = require('express');
 const nodemailer = require('nodemailer');
-const { otplib } = require('otplib');
-const axios = require('axios');
-
 const app = express();
-app.use(express.json());
 
-const GOOGLE_USER = process.env.GOOGLE_USER;
-const GOOGLE_APP_PASS = process.env.GOOGLE_APP_PASS;
-const TARGET_SMS_EMAIL = process.env.TARGET_SMS_EMAIL;
-const TOTP_SECRET = process.env.TOTP_SECRET;
-const NOTEHUB_TOKEN = process.env.NOTEHUB_TOKEN;
-const NOTEHUB_PROJECT = process.env.NOTEHUB_PROJECT || 'com.techbyjr.jose:hsg18ms';
+app.use(express.json());
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
-  auth: { user: GOOGLE_USER, pass: GOOGLE_APP_PASS }
-});
-
-function sendSMS(messageText) {
-  return transporter.sendMail({
-    from: GOOGLE_USER,
-    to: TARGET_SMS_EMAIL,
-    subject: '',
-    text: messageText
-  });
-}
-
-// Receive Notehub Webhooks
-app.post('/notehub-webhook', async (req, res) => {
-  try {
-    const { event, location, device } = req.body;
-
-    if (event === 'device_moved') {
-      await sendSMS("device moved");
-      const host = req.headers.host;
-      await sendSMS(`Was the device moved by you? Verify TOTP: https://${host}/verify?pin=YOUR_PIN&device=${device}`);
-    } 
-    else if (event === 'security_breach') {
-      const mapsLink = location ? `https://maps.google.com/?q=${location.lat},${location.lon}` : 'Location unknown';
-      await sendSMS(`Security breached. Current Location: ${mapsLink}`);
-    } 
-    else if (location && !event) {
-      const mapsLink = `https://maps.google.com/?q=${location.lat},${location.lon}`;
-      await sendSMS(`Periodic GPS Report (hsg18ms): ${mapsLink}`);
-    }
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("Error handling webhook:", err.message);
-    res.sendStatus(500);
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GOOGLE_APP_PASS
   }
 });
 
-// Verify Google Authenticator 2FA PIN
-app.get('/verify', async (req, res) => {
-  const { pin, device } = req.query;
+app.post('/notehub-webhook', async (req, res) => {
+  console.log("Incoming Notehub Payload:", JSON.stringify(req.body));
 
-  if (!pin || !device) return res.status(400).send("Missing PIN or Device ID.");
+  const payload = req.body.body || req.body;
+  const event = payload.event;
+  const lat = (payload.lat || 0).toFixed(5); // 5 decimal places = 1-meter precision
+  const lon = (payload.lon || 0).toFixed(5);
 
-  const isValid = otplib.authenticator.check(pin, TOTP_SECRET);
+  const mapsUrl = `https://maps.google.com/?q=${lat},${lon}`;
+  const wazeUrl = `https://waze.com/ul?ll=${lat},${lon}&navigate=yes`;
 
-  if (isValid) {
-    try {
-      await axios.post(
-        `https://api.notefile.net/v1/projects/${NOTEHUB_PROJECT}/devices/${device}/notes`,
-        { file: "inbound.qi", body: { verified: true } },
-        { headers: { 'X-SESSION-TOKEN': NOTEHUB_TOKEN } }
-      );
-      res.send("PIN Verified. Alarm disarmed.");
-    } catch (err) {
-      res.status(500).send("PIN valid, but failed to notify Notehub.");
-    }
+  let smsBody = "";
+  let smsSubject = "";
+
+  if (event === "boot_location_captured") {
+    smsSubject = "GPS LOCK";
+    smsBody = `Initial 1M Grid captured:\nLat:${lat}, Lon:${lon}\nNav: ${mapsUrl}`;
+  } 
+  else if (event === "device_moved") {
+    smsSubject = "WARNING";
+    smsBody = `Device moved!\nGrid: ${lat}, ${lon}\nReply with 2FA PIN within 30s.\nNav: ${mapsUrl}`;
+  } 
+  else if (event === "security_breach") {
+    smsSubject = "ALERT";
+    smsBody = `The device is moving! 2FA Unverified.\nGrid: ${lat}, ${lon}\nGoogle: ${mapsUrl}\nWaze: ${wazeUrl}`;
+  } 
+  else if (event === "tracking_update") {
+    smsSubject = "TRACKING";
+    smsBody = `The device is moving!\nUpdated Grid: ${lat}, ${lon}\nNav: ${mapsUrl}`;
   } else {
-    res.status(400).send("Invalid PIN.");
+    return res.status(200).json({ status: "ignored" });
+  }
+
+  try {
+    await transporter.sendMail({
+      from: process.env.GMAIL_USER,
+      to: process.env.TARGET_SMS_EMAIL,
+      subject: smsSubject,
+      text: smsBody
+    });
+
+    console.log(`[SMS DISPATCH] Sent '${event}' notification to ${process.env.TARGET_SMS_EMAIL}`);
+    return res.status(200).json({ status: "success", event: event });
+  } catch (err) {
+    console.error("SMS Delivery Failed:", err);
+    return res.status(500).json({ status: "error", message: err.message });
   }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server hsg18ms running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Render Webhook Active on Port ${PORT}`));
