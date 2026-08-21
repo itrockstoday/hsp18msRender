@@ -1,11 +1,11 @@
 const express = require('express');
-const sgMail = require('@sendgrid/mail');
+const { Resend } = require('resend');
 
 const app = express();
 app.use(express.json());
 
-// Initialize SendGrid API Key from Render Environment Variables
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+// Initialize Resend API Key from Render Environment Variables
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 app.post('/notehub-webhook', async (req, res) => {
   console.log("Incoming Notehub Payload:", JSON.stringify(req.body));
@@ -54,19 +54,18 @@ app.post('/notehub-webhook', async (req, res) => {
     return res.status(200).json({ status: "unhandled_event_type" });
   }
 
-  const msg = {
-    to: process.env.TARGET_SMS_EMAIL,        // Your phone carrier address (e.g. 1234567890@vtext.com)
-    from: process.env.VERIFIED_SENDER_EMAIL,  // The address verified under SendGrid Single Sender
-    subject: smsSubject,
-    text: smsBody,
-  };
-
   try {
-    await sgMail.send(msg);
-    console.log(`[SMS DISPATCH SUCCESS] Delivered '${event}' alert to ${process.env.TARGET_SMS_EMAIL}`);
-    return res.status(200).json({ status: "success", event: event });
+    const data = await resend.emails.send({
+      from: 'Onboarding <onboarding@resend.dev>', // Resend's free default sender address
+      to: [process.env.TARGET_SMS_EMAIL],         // e.g. 1234567890@vtext.com or @txt.att.net
+      subject: smsSubject,
+      text: smsBody,
+    });
+
+    console.log(`[SMS DISPATCH SUCCESS] Delivered '${event}' alert to ${process.env.TARGET_SMS_EMAIL}. ID: ${data.id}`);
+    return res.status(200).json({ status: "success", event: event, id: data.id });
   } catch (error) {
-    console.error("SMS Delivery Failed via SendGrid API:", error.response ? error.response.body : error.message);
+    console.error("SMS Delivery Failed via Resend API:", error);
     return res.status(500).json({ status: "error", message: error.message });
   }
 });
