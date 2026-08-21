@@ -1,29 +1,24 @@
 const express = require('express');
-const nodemailer = require('nodemailer');
-const app = express();
+const sgMail = require('@sendgrid/mail');
 
+const app = express();
 app.use(express.json());
 
-// Explicitly configure Port 465 + SSL to bypass Render outbound blocks
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 465,
-  secure: true, // Requires SSL connection
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GOOGLE_APP_PASS
-  },
-  connectionTimeout: 10000, // 10 seconds timeout limit
-  greetingTimeout: 5000,
-  socketTimeout: 10000
-});
+// Initialize SendGrid API Key from Render Environment Variables
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
-// Endpoint matching Notehub Route
 app.post('/notehub-webhook', async (req, res) => {
   console.log("Incoming Notehub Payload:", JSON.stringify(req.body));
 
   const payload = req.body.body || req.body;
   const event = payload.event;
+
+  // Silently ignore background system files (e.g., _track.qo, _session.qo)
+  if (!event) {
+    return res.status(200).json({ status: "ignored_internal_system_note" });
+  }
+
+  // Extract coordinates with 5 decimal precision (~1 meter accuracy)
   const lat = (payload.lat || 0).toFixed(5);
   const lon = (payload.lon || 0).toFixed(5);
 
@@ -33,6 +28,7 @@ app.post('/notehub-webhook', async (req, res) => {
   let smsBody = "";
   let smsSubject = "";
 
+  // Map incoming MCU event types to SMS alert messages
   if (event === "boot_location_captured") {
     smsSubject = "GPS LOCK";
     smsBody = `Initial 1M Grid captured:\nLat:${lat}, Lon:${lon}\nNav: ${mapsUrl}`;
@@ -53,25 +49,27 @@ app.post('/notehub-webhook', async (req, res) => {
   else if (event === "tracking_update") {
     smsSubject = "TRACKING";
     smsBody = `The device is moving!\nUpdated Grid: ${lat}, ${lon}\nNav: ${mapsUrl}`;
-  } else {
-    return res.status(200).json({ status: "ignored" });
+  } 
+  else {
+    return res.status(200).json({ status: "unhandled_event_type" });
   }
 
-  try {
-    await transporter.sendMail({
-      from: process.env.GMAIL_USER,
-      to: process.env.TARGET_SMS_EMAIL,
-      subject: smsSubject,
-      text: smsBody
-    });
+  const msg = {
+    to: process.env.TARGET_SMS_EMAIL,        // Your phone carrier address (e.g. 1234567890@vtext.com)
+    from: process.env.VERIFIED_SENDER_EMAIL,  // The address verified under SendGrid Single Sender
+    subject: smsSubject,
+    text: smsBody,
+  };
 
-    console.log(`[SMS DISPATCH] Delivered '${event}' alert to ${process.env.TARGET_SMS_EMAIL}`);
+  try {
+    await sgMail.send(msg);
+    console.log(`[SMS DISPATCH SUCCESS] Delivered '${event}' alert to ${process.env.TARGET_SMS_EMAIL}`);
     return res.status(200).json({ status: "success", event: event });
-  } catch (err) {
-    console.error("SMS Delivery Failed:", err);
-    return res.status(500).json({ status: "error", message: err.message });
+  } catch (error) {
+    console.error("SMS Delivery Failed via SendGrid API:", error.response ? error.response.body : error.message);
+    return res.status(500).json({ status: "error", message: error.message });
   }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Render Webhook running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Render Webhook Service actively listening on port ${PORT}`));
