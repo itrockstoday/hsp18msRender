@@ -42,7 +42,13 @@ app.post('/notehub-webhook', async (req, res) => {
   else if (event === "tracking_update") {
     smsSubject = "TRACKING";
     smsBody = `The device is moving!\nUpdated Grid: ${lat}, ${lon}\nNav: ${mapsUrl}`;
-  } else {
+  } 
+  else if (event === "vehicle_tilt_warning") {
+    const orientation = payload.orientation || "Tilted";
+    smsSubject = "CRITICAL TILT";
+    smsBody = `Vehicle Rollover/Tilt Detected (${orientation})!\nGrid: ${lat}, ${lon}\nNav: ${mapsUrl}`;
+  }
+  else {
     return res.status(200).json({ status: "ignored" });
   }
 
