@@ -22,27 +22,32 @@ async function sendFailedAuthNotification(attemptedCode, endpointName) {
         }
       }
     );
-    console.log(`[ALERT DISPATCH] 2FA Failure notification pushed to ntfy.`);
   } catch (err) {
     console.error("Failed to push 2FA failure alert:", err.message);
   }
 }
 
-async function setNotehubAppMode(newMode) {
+async function setNotehubConfig(newMode, customLat = null, customLon = null) {
   const projectUid = process.env.NOTEHUB_PROJECT_UID;
   const authToken = process.env.NOTEHUB_AUTH_TOKEN;
 
   if (!projectUid || !authToken) return false;
 
+  const envPayload = { app_mode: newMode };
+  if (customLat && customLon) {
+    envPayload.borrower_home_lat = customLat.toString();
+    envPayload.borrower_home_lon = customLon.toString();
+  }
+
   try {
     await axios.put(
       `https://api.notefile.net/v1/projects/${projectUid}/env`,
-      { env: { app_mode: newMode } },
+      { env: envPayload },
       { headers: { 'X-SESSION-TOKEN': authToken } }
     );
     return true;
   } catch (err) {
-    console.error("Failed to update Notehub app_mode:", err.message);
+    console.error("Failed to update Notehub configuration:", err.message);
     return false;
   }
 }
@@ -65,34 +70,27 @@ async function sendInboundNoteToMCU(bodyData) {
   }
 }
 
-// Middleware: Validates 6-Digit TOTP and notifies on failure
 async function verifyTotpMiddleware(req, res, next) {
-  if (!TOTP_SECRET) {
-    return res.status(500).send("Server configuration error: TOTP secret missing.");
-  }
+  if (!TOTP_SECRET) return res.status(500).send("Server configuration error: TOTP secret missing.");
 
   const code = req.query.code;
-
   if (!code) {
     await sendFailedAuthNotification("MISSING_CODE", req.path);
     return res.status(401).send(`
       <div style="font-family: sans-serif; text-align: center; padding: 40px;">
         <h1 style="color: #d32f2f;">401 Unauthorized</h1>
-        <p>Missing 6-digit 2FA code. Please append <b>?code=123456</b> to the URL.</p>
+        <p>Missing 6-digit 2FA code. Append <b>?code=123456</b> to your request.</p>
       </div>
     `);
   }
 
   const isValid = authenticator.check(code.trim(), TOTP_SECRET);
-
   if (!isValid) {
-    console.warn(`[UNAUTHORIZED ATTEMPT] Invalid TOTP code tried: ${code}`);
     await sendFailedAuthNotification(code, req.path);
-
     return res.status(401).send(`
       <div style="font-family: sans-serif; text-align: center; padding: 40px;">
         <h1 style="color: #d32f2f;">401 Unauthorized</h1>
-        <p>Invalid or expired 2FA code. A failure push notification has been dispatched.</p>
+        <p>Invalid or expired 2FA code.</p>
       </div>
     `);
   }
@@ -102,20 +100,28 @@ async function verifyTotpMiddleware(req, res, next) {
 
 app.get('/set-mode', verifyTotpMiddleware, async (req, res) => {
   const mode = (req.query.mode || '').toUpperCase();
+  const lat = req.query.lat ? parseFloat(req.query.lat) : null;
+  const lon = req.query.lon ? parseFloat(req.query.lon) : null;
+
   if (!['PARKED', 'OWNER', 'BORROWER'].includes(mode)) {
     return res.status(400).send("Invalid mode specified. Use PARKED, OWNER, or BORROWER.");
   }
 
-  const success = await setNotehubAppMode(mode);
+  const success = await setNotehubConfig(mode, lat, lon);
   if (success) {
+    let locMsg = (mode === 'BORROWER' && lat && lon) 
+      ? `<p>Borrower Home Location set to: <b>${lat}, ${lon}</b></p>` 
+      : (mode === 'BORROWER') ? `<p>Borrower Home Location will automatically pin to current device location.</p>` : '';
+
     return res.send(`
       <div style="font-family: sans-serif; text-align: center; padding: 40px;">
         <h1 style="color: #2e7d32;">Mode Successfully Changed to: ${mode}</h1>
+        ${locMsg}
         <p>2FA Authenticated. The Cygnet MCU will sync with Notehub shortly.</p>
       </div>
     `);
   } else {
-    return res.status(500).send("Failed to update mode in Notehub.");
+    return res.status(500).send("Failed to update configuration in Notehub.");
   }
 });
 
@@ -124,7 +130,7 @@ app.get('/verify-2fa', verifyTotpMiddleware, async (req, res) => {
   return res.send(`
     <div style="font-family: sans-serif; text-align: center; padding: 40px;">
       <h1 style="color: #2e7d32;">2FA Disarm Verified!</h1>
-      <p>Identity confirmed via Authenticator. Disarm signal sent over cellular.</p>
+      <p>Identity confirmed. Tilt / Movement alarm disarmed via cellular.</p>
     </div>
   `);
 });
@@ -148,40 +154,43 @@ app.post('/notehub-webhook', async (req, res) => {
   let tags = [];
 
   if (event === "boot_location_captured") {
-    alertTitle = `📍 GPS LOCK [${mode} MODE]`;
-    alertMessage = `System Active.\nGrid: ${lat}, ${lon}`;
+    alertTitle = `📍 SYSTEM POWERED UP [${mode} MODE]`;
+    alertMessage = `System Online (Default: PARKED Mode).\nGrid: ${lat}, ${lon}`;
     tags = ["satellite"];
   } 
-  else if (event === "device_moved") {
-    alertTitle = `⚠️ MOVEMENT DETECTED [${mode} MODE]`;
-    alertMessage = `Vehicle moving!\nGrid: ${lat}, ${lon}\nYou have 2 minutes to authenticate with your 6-digit code.`;
+  else if (event === "parked_tilt_moved") {
+    const baseline = payload.baseline || "Unknown";
+    const current = payload.current || "Unknown";
+    alertTitle = `⚠️ MOVEMENT DETECTED: TILT CHANGED`;
+    alertMessage = `Bike shifted from parked position!\nBaseline: ${baseline} ➔ Current: ${current}\nGrid: ${lat}, ${lon}\n2FA PIN required within 2 minutes!`;
     priority = "4";
     tags = ["warning", "rotating_light"];
   } 
-  else if (event === "vehicle_tilt_warning") {
-    const orientation = payload.orientation || "Tilted";
-    alertTitle = `🚨 CRITICAL TILT DETECTED`;
-    alertMessage = `Vehicle Rollover/Tilt (${orientation})!\nGrid: ${lat}, ${lon}`;
-    priority = "5";
-    tags = ["car", "alert"];
-  }
-  else if (event === "geofence_breach") {
+  else if (event === "geofence_warning_30mi") {
     const dist = payload.distance || 0;
-    alertTitle = `⛔ 40-MILE GEOFENCE BREACH`;
-    alertMessage = `Borrower exceeded limit!\nDistance: ${dist} mi\nGrid: ${lat}, ${lon}`;
+    alertTitle = `⚠️ 30-MILE GEOFENCE WARNING`;
+    alertMessage = `Borrower Notice: ${dist.toFixed(1)} miles from Home Location.\nWithin 10 miles of max allowed area (40-mile limit).`;
+    priority = "3";
+    tags = ["warning", "compass"];
+  }
+  else if (event === "geofence_breach_40mi") {
+    const dist = payload.distance || 0;
+    alertTitle = `⛔ 40-MILE GEOFENCE BREACH (OWNER ALERT)`;
+    alertMessage = `CRITICAL: Borrower exceeded 40-mile limit!\nDistance: ${dist.toFixed(1)} miles.\nGrid: ${lat}, ${lon}`;
     priority = "5";
     tags = ["no_entry_sign", "siren"];
   }
   else if (event === "security_breach") {
-    alertTitle = `⛔ SECURITY BREACH`;
-    alertMessage = `2FA Unverified within 2 mins! Vehicle moving.\nGrid: ${lat}, ${lon}`;
+    alertTitle = `⛔ 2FA SECURITY BREACH`;
+    alertMessage = `SECURITY BREACH HAS BEEN TRIGGERED!\nNo 2FA PIN provided within 2 minutes.\nEnter 2FA PIN to stop security breach notifications.\nGrid: ${lat}, ${lon}`;
     priority = "5";
-    tags = ["siren"];
+    tags = ["siren", "no_entry"];
   } 
   else if (event === "tracking_update") {
-    alertTitle = `📡 TRACKING UPDATE`;
-    alertMessage = `Updated Grid: ${lat}, ${lon}`;
-    tags = ["compass"];
+    alertTitle = `📡 SECURITY BREACH: GPS UPDATE`;
+    alertMessage = `ALERT: 2FA Security Breach Active!\nUpdated Grid: ${lat}, ${lon}\nEnter 2FA PIN to stop notifications.`;
+    priority = "5";
+    tags = ["compass", "warning"];
   } 
   else {
     return res.status(200).json({ status: "unhandled_event_type" });
@@ -196,7 +205,7 @@ app.post('/notehub-webhook', async (req, res) => {
         'Priority': priority,
         'Tags': tags.join(','),
         'Click': mapsUrl,
-        'Actions': `view, Authenticate 2FA, ${secureDisarmUrl}`
+        'Actions': `view, Enter 2FA PIN, ${secureDisarmUrl}`
       }
     });
 
