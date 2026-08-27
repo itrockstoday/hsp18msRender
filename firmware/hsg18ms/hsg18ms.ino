@@ -3,7 +3,7 @@
 #include <math.h>
 
 #define PRODUCT_UID "com.techbyjr.jose:hspg18ms"
-#define PIN_TIMEOUT_MS 240000 // 4-Minute 2FA Window
+#define PIN_TIMEOUT_MS 120000 // 2-Minute 2FA Window
 #define usbSerial Serial
 
 Notecard notecard;
@@ -20,7 +20,6 @@ enum DeviceState {
   STATE_TRACKING_BREACH
 };
 
-// Default system state upon boot
 OperatingMode currentMode = MODE_PARKED;
 DeviceState currentState = STATE_IDLE;
 
@@ -31,7 +30,7 @@ unsigned long lastPeriodicTrackTime = 0;
 char parkedBaselineOrientation[32] = "unknown";
 bool baselineCaptured = false;
 
-// Borrower Geofence High-Precision Home Coordinates (64-bit doubles)
+// Borrower Geofence High-Precision Coordinates (64-bit doubles)
 double borrowerOriginLat = 0.0;
 double borrowerOriginLon = 0.0;
 bool warning30MileSent = false;
@@ -59,37 +58,38 @@ void setup() {
   JAddBoolToObject(req, "sync", true);
   notecard.sendRequest(req);
 
-  // 2. High-Precision GNSS / Active Antenna Configuration
-  // Enables vbias (3.3V LNA power to active antenna) and high-accuracy satellite search
-  req = notecard.newRequest("card.location.mode");
-  JAddStringToObject(req, "mode", "periodic");
-  JAddNumberToObject(req, "seconds", 15);        // 15-second evaluation window
-  JAddBoolToObject(req, "vbias", true);          // Powers active antenna LNA
-  JAddBoolToObject(req, "active", true);         // Active antenna circuit enabled
-  JAddBoolToObject(req, "high", true);           // Force high-accuracy 1-meter multi-constellation fix
-  JAddNumberToObject(req, "max", 120);           // Allow up to 120s search window for high precision
+  // 2. Clear stale cache to force fresh GNSS lock
+  req = notecard.newRequest("card.location.dispatch");
+  JAddBoolToObject(req, "reset", true);
   notecard.sendRequest(req);
 
-  // 3. Motion & Orientation Sensing Setup
+  // 3. High-Precision GNSS / Active Antenna Configuration
+  req = notecard.newRequest("card.location.mode");
+  JAddStringToObject(req, "mode", "continuous"); // Continuous engine mode forces active satellite scanning
+  JAddBoolToObject(req, "vbias", true);          // Powers 3.3V active antenna LNA
+  JAddBoolToObject(req, "active", true);         // Active antenna circuit enabled
+  JAddBoolToObject(req, "high", true);           // Force high-accuracy 1-meter multi-constellation fix
+  JAddNumberToObject(req, "max", 180);           // Allow up to 180s search window for fresh fix
+  notecard.sendRequest(req);
+
+  // 4. Motion & Orientation Sensing Setup
   req = notecard.newRequest("card.motion.mode");
   JAddNumberToObject(req, "sensitivity", 1);
   JAddBoolToObject(req, "orientation", true);
   JAddBoolToObject(req, "start", true);
   notecard.sendRequest(req);
 
-  // Sync initial configuration state from Notehub environment
   syncOperatingModeFromNotehub();
 
   usbSerial.println("\n[BOOT] System Power On. Defaulting to PARKED Mode...");
 
-  // Capture baseline tilt if starting in PARKED mode
   if (currentMode == MODE_PARKED) {
     captureParkedBaselineOrientation();
   }
 
-  // Attempt initial high-precision GNSS lock on boot
+  // Attempt high-precision GNSS satellite lock on boot
   double initialLat = 0.0, initialLon = 0.0;
-  if (waitForGpsLock(initialLat, initialLon, 45)) {
+  if (waitForGpsLock(initialLat, initialLon, 60)) {
     if (currentMode == MODE_BORROWER && borrowerOriginLat == 0.0) {
       borrowerOriginLat = initialLat;
       borrowerOriginLon = initialLon;
@@ -108,10 +108,9 @@ void loop() {
     captureParkedBaselineOrientation();
   }
 
-  // Process inbound disarm commands continuously
   checkIncoming2FA();
 
-  // OWNER MODE: Fully unrestricted, suppress all alarms
+  // OWNER MODE: Fully disarmed
   if (currentMode == MODE_OWNER) {
     currentState = STATE_IDLE;
     delay(4000);
@@ -130,7 +129,6 @@ void loop() {
         const char *currentOrientation = JGetString(rsp, "status");
 
         if (currentOrientation && strlen(currentOrientation) > 0) {
-          // Compare current resting position to baseline orientation captured when parked
           if (strcmp(currentOrientation, parkedBaselineOrientation) != 0) {
             usbSerial.printf("\n[ALERT] Parked Position Shifted! Baseline: %s | Current: %s\n", 
                                parkedBaselineOrientation, currentOrientation);
@@ -147,7 +145,7 @@ void loop() {
     // 2. BORROWER MODE GEOFENCE EVALUATION (Tilt/Motion alarms disabled)
     if (currentMode == MODE_BORROWER && borrowerOriginLat != 0.0 && borrowerOriginLon != 0.0) {
       double currentLat = 0.0, currentLon = 0.0;
-      if (waitForGpsLock(currentLat, currentLon, 5)) {
+      if (waitForGpsLock(currentLat, currentLon, 10)) {
         double distMiles = calculateDistanceMiles(borrowerOriginLat, borrowerOriginLon, currentLat, currentLon);
 
         // 30-Mile Warning Threshold
@@ -195,7 +193,7 @@ void loop() {
   delay(2000);
 }
 
-// Captures resting tilt baseline when bike enters PARKED mode
+// Storing resting tilt baseline position when entering PARKED mode
 void captureParkedBaselineOrientation() {
   delay(1000);
   J *req = notecard.newRequest("card.motion");
@@ -214,7 +212,7 @@ void captureParkedBaselineOrientation() {
   notecard.deleteResponse(rsp);
 }
 
-// High-precision Haversine formula using 64-bit double precision
+// 64-bit double precision Haversine calculation
 double calculateDistanceMiles(double lat1, double lon1, double lat2, double lon2) {
   double lat1Rad = lat1 * M_PI / 180.0;
   double lon1Rad = lon1 * M_PI / 180.0;
@@ -232,7 +230,7 @@ double calculateDistanceMiles(double lat1, double lon1, double lat2, double lon2
   return 3958.8 * c;
 }
 
-// Synchronizes environment configuration variables from Notehub
+// Synchronizes configuration variables from Notehub environment
 void syncOperatingModeFromNotehub() {
   J *req = notecard.newRequest("env.get");
   JAddStringToObject(req, "name", "app_mode");
@@ -267,20 +265,25 @@ void syncOperatingModeFromNotehub() {
   notecard.deleteResponse(rsp);
 }
 
-// Queries high-precision coordinates with sub-meter double extraction
+// High-precision coordinate extraction with satellite tracking
 bool waitForGpsLock(double &lat, double &lon, int maxWaitSeconds) {
   for (int i = 0; i < maxWaitSeconds; i++) {
     J *req = notecard.newRequest("card.location");
     J *rsp = notecard.requestAndResponse(req);
 
     if (rsp && !NoteResponseError(rsp)) {
-      // Must use double precision variables to prevent accuracy loss beyond 4 decimal places
-      lat = JGetNumber(rsp, "lat");
-      lon = JGetNumber(rsp, "lon");
+      int sats = JGetInt(rsp, "sats");
       int accuracy = JGetInt(rsp, "accuracy");
 
-      if (lat != 0.0 && lon != 0.0) {
-        usbSerial.printf("[GNSS LOCK] Lat: %.7f, Lon: %.7f (Est Accuracy: ~%dm)\n", lat, lon, accuracy);
+      lat = JGetNumber(rsp, "lat");
+      lon = JGetNumber(rsp, "lon");
+
+      usbSerial.printf("[GNSS POLLING] Satellites: %d | Lat: %.7f, Lon: %.7f\n", sats, lat, lon);
+
+      // Verify active satellite lock with valid coordinates
+      if (lat != 0.0 && lon != 0.0 && sats >= 4) {
+        usbSerial.printf("\n[HIGH-PRECISION LOCK] Lat: %.7f, Lon: %.7f (%d SVs, Accuracy: ~%dm)\n", 
+                         lat, lon, sats, accuracy);
         notecard.deleteResponse(rsp);
         return true;
       }
@@ -291,7 +294,7 @@ bool waitForGpsLock(double &lat, double &lon, int maxWaitSeconds) {
   return false;
 }
 
-// Dispatches structured JSON alerts to Notehub outbound queue
+// Dispatches notes to Notehub outbound queue
 void sendAlertNote(const char *eventType, const char *baselineStr, const char *currentStr, double extraNum) {
   J *req = notecard.newRequest("card.location");
   J *rsp = notecard.requestAndResponse(req);
@@ -324,7 +327,7 @@ void sendAlertNote(const char *eventType, const char *baselineStr, const char *c
   notecard.sendRequest(req);
 }
 
-// Processes incoming 2FA disarm notes from Notehub
+// Checks incoming disarm notes from Notehub
 void checkIncoming2FA() {
   J *req = notecard.newRequest("note.get");
   JAddStringToObject(req, "file", "inbound.qi");

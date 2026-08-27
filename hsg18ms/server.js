@@ -5,11 +5,13 @@ const { authenticator } = require('otplib');
 const app = express();
 app.use(express.json());
 
+// Enable +/- 1 window tolerance (30s time-drift window) for TOTP verification
 authenticator.options = { window: 1 };
 
 const NTFY_TOPIC = process.env.NTFY_TOPIC_NAME || 'hspg18ms_alerts_3486';
 const TOTP_SECRET = process.env.TOTP_SECRET;
 
+// Dispatch alert when 2FA authentication fails
 async function sendFailedAuthNotification(attemptedCode, endpointName) {
   try {
     await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, 
@@ -27,6 +29,7 @@ async function sendFailedAuthNotification(attemptedCode, endpointName) {
   }
 }
 
+// Update Notehub environment variables
 async function setNotehubConfig(newMode, customLat = null, customLon = null) {
   const projectUid = process.env.NOTEHUB_PROJECT_UID;
   const authToken = process.env.NOTEHUB_AUTH_TOKEN;
@@ -52,6 +55,7 @@ async function setNotehubConfig(newMode, customLat = null, customLon = null) {
   }
 }
 
+// Queue inbound disarm note to the MCU
 async function sendInboundNoteToMCU(bodyData) {
   const projectUid = process.env.NOTEHUB_PROJECT_UID;
   const deviceUid = process.env.NOTEHUB_DEVICE_UID;
@@ -70,6 +74,7 @@ async function sendInboundNoteToMCU(bodyData) {
   }
 }
 
+// Express Middleware for 2FA validation
 async function verifyTotpMiddleware(req, res, next) {
   if (!TOTP_SECRET) return res.status(500).send("Server configuration error: TOTP secret missing.");
 
@@ -89,8 +94,8 @@ async function verifyTotpMiddleware(req, res, next) {
     await sendFailedAuthNotification(code, req.path);
     return res.status(401).send(`
       <div style="font-family: sans-serif; text-align: center; padding: 40px;">
-        <h1 style="color: #d32f2f;">401 Unauthorized</h1>
-        <p>Invalid or expired 2FA code.</p>
+        <h1 style="color: #d32f2f;">401 Unauthorized (Invalid 2FA Code)</h1>
+        <p>The code <b>${code}</b> is invalid or expired. Please generate a fresh code in your 2FA app.</p>
       </div>
     `);
   }
@@ -98,6 +103,7 @@ async function verifyTotpMiddleware(req, res, next) {
   next();
 }
 
+// GET Endpoint to update operational mode
 app.get('/set-mode', verifyTotpMiddleware, async (req, res) => {
   const mode = (req.query.mode || '').toUpperCase();
   const lat = req.query.lat ? parseFloat(req.query.lat) : null;
@@ -125,6 +131,7 @@ app.get('/set-mode', verifyTotpMiddleware, async (req, res) => {
   }
 });
 
+// GET Endpoint to clear active security breaches
 app.get('/verify-2fa', verifyTotpMiddleware, async (req, res) => {
   await sendInboundNoteToMCU({ verified: true });
   return res.send(`
@@ -135,14 +142,15 @@ app.get('/verify-2fa', verifyTotpMiddleware, async (req, res) => {
   `);
 });
 
+// Webhook endpoint to consume Notehub alerts and push to ntfy.sh
 app.post('/notehub-webhook', async (req, res) => {
   const payload = req.body.body || req.body;
   const event = payload.event;
 
   if (!event) return res.status(200).json({ status: "ignored_internal_system_note" });
 
-  const lat = (payload.lat || 0).toFixed(5);
-  const lon = (payload.lon || 0).toFixed(5);
+  const lat = (payload.lat || 0).toFixed(6);
+  const lon = (payload.lon || 0).toFixed(6);
   const mode = payload.mode || "PARKED";
   const mapsUrl = `https://maps.google.com/?q=${lat},${lon}`;
   
