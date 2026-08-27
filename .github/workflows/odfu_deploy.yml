@@ -1,0 +1,43 @@
+name: Compile & Deploy Cellular ODFU Firmware
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'firmware/**'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install STM32 Core & Blues Libraries
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install STMicroelectronics:stm32
+          arduino-cli lib install "Blues Wireless Notecard"
+
+      - name: Compile Cygnet C++ Firmware to Binary
+        run: |
+          arduino-cli compile \
+            --fqbn STMicroelectronics:stm32:Blues:pnum=CYGNET \
+            --output-dir ./build \
+            ./firmware/hsg18ms
+
+      - name: Upload Binary to Notehub Host Firmware Pool
+        run: |
+          FIRMWARE_FILE=$(ls ./build/*.bin | head -n 1)
+          FILENAME=$(basename $FIRMWARE_FILE)
+          
+          echo "Uploading $FILENAME to Notehub host firmware endpoint..."
+          
+          curl -X POST "https://api.notefile.net/v1/projects/${{ secrets.NOTEHUB_PROJECT_UID }}/firmware/host/$FILENAME" \
+            -H "X-SESSION-TOKEN: ${{ secrets.NOTEHUB_AUTH_TOKEN }}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary "@$FIRMWARE_FILE"

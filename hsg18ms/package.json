@@ -1,6 +1,7 @@
 {
   "name": "hsg18ms",
   "version": "1.0.0",
+  "description": "Render Webhook and 2FA Service for Blues Feather Kit Tracker",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
