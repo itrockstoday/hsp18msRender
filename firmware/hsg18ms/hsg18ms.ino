@@ -76,16 +76,15 @@ void setup() {
   J *req = notecard.newRequest("hub.set");
   JAddStringToObject(req, "product", PRODUCT_NOTE_UID);
   JAddStringToObject(req, "mode", "continuous");
-  JAddStringToObject(req, "sync", true);
+  JAddBoolToObject(req, "sync", true); // FIX: Used JAddBoolToObject instead of JAddStringToObject
   notecard.sendRequest(req);
 
-  // Enable Location Services (Periodic Mode)
+  // Configure Location Services: Set to off/manual mode so background 2-minute updates do NOT fire automatically
   req = notecard.newRequest("card.location.mode");
-  JAddStringToObject(req, "mode", "periodic");
-  JAddNumberToObject(req, "seconds", 120);
+  JAddStringToObject(req, "mode", "off");
   notecard.sendRequest(req);
 
-  // Initial Location Fetch (Non-blocking)
+  // Initial Location Fetch (Non-blocking cached pull)
   updateCachedLocation(false);
 
   // Initial Sync of Environment Variables
@@ -111,7 +110,7 @@ void loop() {
 
   // 4. Handle 2FA Timer Expiration & Active Tracking State Machine
   if (currentState == STATE_AWAITING_2FA) {
-    // Non-blocking location update during 2FA window
+    // Non-blocking location check during 2FA window
     updateCachedLocation(false);
 
     if (millis() - twoFaStartTime >= TWO_FA_TIMEOUT_MS) {
@@ -124,11 +123,12 @@ void loop() {
     }
   } 
   else if (currentState == STATE_TRACKING_BREACH) {
+    // ONLY push 2-minute tracking updates when in active SECURITY BREACH
     if (millis() - lastTrackingTime >= TRACKING_INTERVAL_MS) {
       lastTrackingTime = millis();
       
       usbSerial.println("[TRACKING] Polling GPS fix for 2-minute stolen vehicle update...");
-      updateCachedLocation(true); // Attempt quick GPS fix
+      updateCachedLocation(true); // Request active GPS fix
       sendAlertNote("tracking_update");
     }
   }
@@ -139,7 +139,6 @@ void loop() {
 // Retrieve cached location from Notecard without blocking execution
 void updateCachedLocation(bool waitForLock) {
   if (waitForLock) {
-    // Polling for fix if explicitly requested (e.g., during active tracking)
     J *reqFix = notecard.newRequest("card.location");
     notecard.sendRequest(reqFix);
     delay(2000);
@@ -339,5 +338,5 @@ double calculateDistanceMiles(double lat1, double lon1, double lat2, double lon2
              cos(lat1 * M_PI / 180.0) * cos(lat2 * M_PI / 180.0) *
              pow(sin(dLon / 2.0), 2);
   double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
-  return 3958.8 * c; // Earth radius in miles
+  return 3958.8 * c;
 }
