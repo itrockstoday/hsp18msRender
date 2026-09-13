@@ -30,7 +30,7 @@ unsigned long lastPeriodicTrackTime = 0;
 char parkedBaselineOrientation[32] = "unknown";
 bool baselineCaptured = false;
 
-// Borrower Geofence High-Precision Coordinates (64-bit doubles)
+// Borrower Geofence Coordinates
 double borrowerOriginLat = 0.0;
 double borrowerOriginLon = 0.0;
 bool warning30MileSent = false;
@@ -51,68 +51,63 @@ void setup() {
   notecard.begin();
   notecard.setDebugOutputStream(usbSerial);
 
-  // 1. Cellular Network Configuration
+  // 1. Cellular Network Setup
   J *req = notecard.newRequest("hub.set");
   JAddStringToObject(req, "product", PRODUCT_UID);
   JAddStringToObject(req, "mode", "continuous");
   JAddBoolToObject(req, "sync", true);
   notecard.sendRequest(req);
 
-  // 2. Clear stale location cache to force satellite search
+  // 2. Clear stale cache
   req = notecard.newRequest("card.location.dispatch");
   JAddBoolToObject(req, "reset", true);
   notecard.sendRequest(req);
 
-  // 3. High-Precision GNSS / Active Antenna Configuration (Bingfu LNA Active Power)
+  // 3. GNSS & Active Antenna Power Configuration
   req = notecard.newRequest("card.location.mode");
-  JAddStringToObject(req, "mode", "continuous"); // Continuous engine mode forces active satellite scanning
-  JAddBoolToObject(req, "vbias", true);          // Powers 3.3V active antenna LNA
-  JAddBoolToObject(req, "active", true);         // Active antenna circuit enabled
-  JAddBoolToObject(req, "high", true);           // Force high-accuracy fix
-  JAddNumberToObject(req, "max", 180);           // Extend max search window to 180 seconds
+  JAddStringToObject(req, "mode", "continuous");
+  JAddBoolToObject(req, "vbias", true);   // 3.3V bias for Bingfu LNA Active Antenna
+  JAddBoolToObject(req, "active", true);  // Enable active antenna circuit
+  JAddBoolToObject(req, "high", true);
+  JAddNumberToObject(req, "max", 180);
   notecard.sendRequest(req);
 
-  // 4. Motion & Orientation Sensing Setup
+  // 4. Motion Sensing Setup
   req = notecard.newRequest("card.motion.mode");
   JAddNumberToObject(req, "sensitivity", 1);
   JAddBoolToObject(req, "orientation", true);
   JAddBoolToObject(req, "start", true);
   notecard.sendRequest(req);
 
-  // Sync mode and coordinates set remotely from server
   syncOperatingModeFromNotehub();
+  captureParkedBaselineOrientation();
 
-  usbSerial.println("\n[BOOT] System Power On. Mode synchronized.");
+  usbSerial.println("\n[BOOT] System Power On. Mode: PARKED.");
 
-  if (currentMode == MODE_PARKED) {
-    captureParkedBaselineOrientation();
+  // Fast 15-second attempt for satellite coordinates on boot
+  double bootLat = 0.0, bootLon = 0.0;
+  waitForGpsLock(bootLat, bootLon, 15);
+
+  if (currentMode == MODE_BORROWER && borrowerOriginLat == 0.0 && bootLat != 0.0) {
+    borrowerOriginLat = bootLat;
+    borrowerOriginLon = bootLon;
   }
 
-  // Attempt high-precision GNSS satellite lock on boot
-  double initialLat = 0.0, initialLon = 0.0;
-  if (waitForGpsLock(initialLat, initialLon, 60)) {
-    if (currentMode == MODE_BORROWER && borrowerOriginLat == 0.0) {
-      borrowerOriginLat = initialLat;
-      borrowerOriginLon = initialLon;
-      usbSerial.printf("[BORROWER] Dynamic Home Pin captured: %.7f, %.7f\n", borrowerOriginLat, borrowerOriginLon);
-    }
-    sendAlertNote("boot_location_captured");
-  }
+  // Dispatch startup notification with coordinates (NO 2FA REQUIRED)
+  sendAlertNote("boot_location_captured");
 }
 
 void loop() {
   OperatingMode previousMode = currentMode;
   
-  // Synchronize remote settings and inbound server disarms
   syncOperatingModeFromNotehub();
   checkIncoming2FA();
 
-  // Reset parked baseline orientation if mode changed to PARKED or baseline missing
   if (currentMode == MODE_PARKED && (previousMode != MODE_PARKED || !baselineCaptured)) {
     captureParkedBaselineOrientation();
   }
 
-  // OWNER MODE: Fully disarmed
+  // OWNER MODE: Disarmed
   if (currentMode == MODE_OWNER) {
     currentState = STATE_IDLE;
     delay(4000);
@@ -122,7 +117,7 @@ void loop() {
   // IDLE MONITORING STATE
   if (currentState == STATE_IDLE) {
 
-    // 1. PARKED MODE TILT SENSING (ISOLATED TO PARKED MODE ONLY)
+    // 1. PARKED MODE TILT SENSING
     if (currentMode == MODE_PARKED && baselineCaptured) {
       J *req = notecard.newRequest("card.motion");
       J *rsp = notecard.requestAndResponse(req);
@@ -132,7 +127,7 @@ void loop() {
 
         if (currentOrientation && strlen(currentOrientation) > 0) {
           if (strcmp(currentOrientation, parkedBaselineOrientation) != 0) {
-            usbSerial.printf("\n[ALERT] Parked Position Shifted! Baseline: %s | Current: %s\n", 
+            usbSerial.printf("\n[ALERT] Tilt Changed! Baseline: %s | Current: %s\n", 
                            parkedBaselineOrientation, currentOrientation);
 
             sendAlertNote("parked_tilt_moved", parkedBaselineOrientation, currentOrientation);
@@ -144,16 +139,14 @@ void loop() {
       notecard.deleteResponse(rsp);
     }
 
-    // 2. BORROWER MODE GEOFENCE EVALUATION (Tilt/Motion alarms disabled)
+    // 2. BORROWER MODE GEOFENCE EVALUATION
     if (currentMode == MODE_BORROWER && borrowerOriginLat != 0.0 && borrowerOriginLon != 0.0) {
       double currentLat = 0.0, currentLon = 0.0;
       if (waitForGpsLock(currentLat, currentLon, 10)) {
         double distMiles = calculateDistanceMiles(borrowerOriginLat, borrowerOriginLon, currentLat, currentLon);
 
-        // 30-Mile Warning Threshold
         if (distMiles >= 30.0 && distMiles < 40.0) {
           if (!warning30MileSent) {
-            usbSerial.printf("\n[30-MILE WARNING] Vehicle is %.2f miles from Home Location.\n", distMiles);
             sendAlertNote("geofence_warning_30mi", NULL, NULL, distMiles);
             warning30MileSent = true;
           }
@@ -161,9 +154,7 @@ void loop() {
           warning30MileSent = false;
         }
 
-        // 40-Mile Breach Threshold
         if (distMiles >= 40.0) {
-          usbSerial.printf("\n[40-MILE BREACH] Vehicle is %.2f miles from Home Location! Notifying Owner.\n", distMiles);
           sendAlertNote("geofence_breach_40mi", NULL, NULL, distMiles);
           currentState = STATE_TRACKING_BREACH;
           lastPeriodicTrackTime = millis();
@@ -183,10 +174,9 @@ void loop() {
     }
   }
 
-  // CONTINUOUS 2-MINUTE GPS TRACKING & BREACH ALERTS
+  // 2-MINUTE GPS TRACKING UPDATES
   if (currentState == STATE_TRACKING_BREACH) {
     if (millis() - lastPeriodicTrackTime >= 120000) {
-      usbSerial.println("\n[TRACKING UPDATE] Dispatching 2-minute breach GPS location...");
       sendAlertNote("tracking_update");
       lastPeriodicTrackTime = millis();
     }
@@ -195,7 +185,6 @@ void loop() {
   delay(2000);
 }
 
-// Storing resting tilt baseline position when entering PARKED mode
 void captureParkedBaselineOrientation() {
   delay(1000);
   J *req = notecard.newRequest("card.motion");
@@ -209,12 +198,11 @@ void captureParkedBaselineOrientation() {
       strcpy(parkedBaselineOrientation, "upright");
     }
     baselineCaptured = true;
-    usbSerial.printf("[PARKED BASELINE] Resting orientation stored: %s\n", parkedBaselineOrientation);
+    usbSerial.printf("[PARKED BASELINE] Stored: %s\n", parkedBaselineOrientation);
   }
   notecard.deleteResponse(rsp);
 }
 
-// 64-bit double precision Haversine calculation
 double calculateDistanceMiles(double lat1, double lon1, double lat2, double lon2) {
   double lat1Rad = lat1 * M_PI / 180.0;
   double lon1Rad = lon1 * M_PI / 180.0;
@@ -232,7 +220,6 @@ double calculateDistanceMiles(double lat1, double lon1, double lat2, double lon2
   return 3958.8 * c;
 }
 
-// Synchronizes configuration variables from Notehub environment
 void syncOperatingModeFromNotehub() {
   J *req = notecard.newRequest("env.get");
   JAddStringToObject(req, "name", "app_mode");
@@ -267,7 +254,6 @@ void syncOperatingModeFromNotehub() {
   notecard.deleteResponse(rsp);
 }
 
-// High-precision coordinate extraction with satellite tracking
 bool waitForGpsLock(double &lat, double &lon, int maxWaitSeconds) {
   for (int i = 0; i < maxWaitSeconds; i++) {
     J *req = notecard.newRequest("card.location");
@@ -275,17 +261,11 @@ bool waitForGpsLock(double &lat, double &lon, int maxWaitSeconds) {
 
     if (rsp && !notecard.responseError(rsp)) {
       int sats = JGetInt(rsp, "sats");
-      int accuracy = JGetInt(rsp, "accuracy");
-
       lat = JGetNumber(rsp, "lat");
       lon = JGetNumber(rsp, "lon");
 
-      usbSerial.printf("[GNSS POLLING] Satellites: %d | Lat: %.7f, Lon: %.7f\n", sats, lat, lon);
-
-      // Verify active satellite lock with valid coordinates
-      if (lat != 0.0 && lon != 0.0 && sats >= 4) {
-        usbSerial.printf("\n[HIGH-PRECISION LOCK] Lat: %.7f, Lon: %.7f (%d SVs, Accuracy: ~%dm)\n", 
-                         lat, lon, sats, accuracy);
+      if (lat != 0.0 && lon != 0.0 && sats >= 1) {
+        usbSerial.printf("[GNSS LOCK] Lat: %.8f, Lon: %.8f (%d SVs)\n", lat, lon, sats);
         notecard.deleteResponse(rsp);
         return true;
       }
@@ -296,7 +276,6 @@ bool waitForGpsLock(double &lat, double &lon, int maxWaitSeconds) {
   return false;
 }
 
-// Dispatches notes to Notehub outbound queue
 void sendAlertNote(const char *eventType, const char *baselineStr, const char *currentStr, double extraNum) {
   J *req = notecard.newRequest("card.location");
   J *rsp = notecard.requestAndResponse(req);
@@ -329,7 +308,6 @@ void sendAlertNote(const char *eventType, const char *baselineStr, const char *c
   notecard.sendRequest(req);
 }
 
-// Checks incoming disarm notes from Notehub
 void checkIncoming2FA() {
   J *req = notecard.newRequest("note.get");
   JAddStringToObject(req, "file", "inbound.qi");
@@ -339,7 +317,7 @@ void checkIncoming2FA() {
   if (rsp && !notecard.responseError(rsp)) {
     J *body = JGetObject(rsp, "body");
     if (body && JGetBool(body, "verified")) {
-      usbSerial.println("\n[SECURITY] Disarm signal verified over cellular. Resetting state to IDLE.");
+      usbSerial.println("\n[SECURITY] Disarm verified over cellular. Resetting to IDLE.");
       currentState = STATE_IDLE;
       if (currentMode == MODE_PARKED) {
         captureParkedBaselineOrientation();
