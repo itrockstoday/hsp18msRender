@@ -1,7 +1,7 @@
 {
   "name": "hsg18ms-security-server",
-  "version": "1.0.0",
-  "description": "Render Webhook Backend for Blues Swan, Active GPS, 2FA Push Buttons, and Geofencing",
+  "version": "1.1.0",
+  "description": "Multi-User Render Webhook Backend for Blues Feather Kit, 2FA Interactive Push Buttons, and Role-Based Access Control",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

@@ -9,8 +9,48 @@ app.use(express.urlencoded({ extended: true }));
 authenticator.options = { window: 1 };
 
 const NTFY_TOPIC = process.env.NTFY_TOPIC_NAME || 'hspg18ms_alerts_3486';
-const TOTP_SECRET = process.env.TOTP_SECRET;
 
+/* 
+  USER REGISTRY CONFIGURATION (Environment Variable: USER_REGISTRY_JSON)
+  Expected JSON structure inside Render Environment Variables:
+  [
+    { "name": "Primary Owner", "secret": "JBSWY3DPEHPK3PXP", "role": "OWNER" },
+    { "name": "Brother", "secret": "HXDMVJECJJW9833D", "role": "OWNER" },
+    { "name": "Friend Alex", "secret": "KRSXG5CTMVRXEZLU", "role": "BORROWER" },
+    { "name": "Friend Sam", "secret": "MZXXE5DFOR2XEZLU", "role": "BORROWER" }
+  ]
+*/
+function getUsers() {
+  const jsonStr = process.env.USER_REGISTRY_JSON;
+  if (!jsonStr) {
+    // Fallback single-user configuration if USER_REGISTRY_JSON is not yet set
+    const fallbackSecret = process.env.TOTP_SECRET;
+    if (fallbackSecret) {
+      return [{ name: "Default Owner", secret: fallbackSecret, role: "OWNER" }];
+    }
+    return [];
+  }
+  try {
+    return JSON.parse(jsonStr);
+  } catch (err) {
+    console.error("Error parsing USER_REGISTRY_JSON environment variable:", err.message);
+    return [];
+  }
+}
+
+// Authenticates TOTP code against registered users and returns user object or null
+function authenticateUser(code) {
+  if (!code) return null;
+  const users = getUsers();
+  for (const user of users) {
+    if (user.secret && authenticator.check(code, user.secret)) {
+      return user;
+    }
+  }
+  return null;
+}
+
+// Helper: Notify admin of failed TOTP attempts
 async function sendFailedAuthNotification(attemptedCode, endpointName) {
   try {
     await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, 
@@ -28,6 +68,7 @@ async function sendFailedAuthNotification(attemptedCode, endpointName) {
   }
 }
 
+// Helper: Update Notehub environment variables
 async function setNotehubConfig(newMode, customLat = null, customLon = null) {
   const projectUid = process.env.NOTEHUB_PROJECT_UID;
   const authToken = process.env.NOTEHUB_AUTH_TOKEN;
@@ -53,6 +94,7 @@ async function setNotehubConfig(newMode, customLat = null, customLon = null) {
   }
 }
 
+// Helper: Post disarm/command note directly to device inbound queue (inbound.qi)
 async function sendInboundNoteToMCU(bodyData) {
   const projectUid = process.env.NOTEHUB_PROJECT_UID;
   const deviceUid = process.env.NOTEHUB_DEVICE_UID;
@@ -78,62 +120,80 @@ function extractTotpCode(req) {
 }
 
 // --------------------------------------------------------------------------
-// 2FA TOTP Middleware (Temporarily Commented Out for Active Testing Phase)
+// Multi-User TOTP Authentication Middleware
 // --------------------------------------------------------------------------
 async function verifyTotpMiddleware(req, res, next) {
-  /*
-  if (!TOTP_SECRET) return res.status(500).send("Server configuration error: TOTP secret missing.");
-
   const code = extractTotpCode(req);
   if (!code) {
     await sendFailedAuthNotification("MISSING_CODE", req.path);
     return res.status(401).json({ status: "error", message: "Missing 6-digit TOTP code." });
   }
 
-  const isValid = authenticator.check(code, TOTP_SECRET);
-  if (!isValid) {
+  const authenticatedUser = authenticateUser(code);
+  if (!authenticatedUser) {
     await sendFailedAuthNotification(code, req.path);
     return res.status(401).json({ status: "error", message: `Invalid or expired 2FA code: ${code}` });
   }
-  */
 
-  // Bypass 2FA check during testing phase
+  // Attach authenticated user identity to request object
+  req.user = authenticatedUser;
   next();
 }
 
+// Endpoint: Mode change requested via ntfy action or web request
 app.all('/set-mode', verifyTotpMiddleware, async (req, res) => {
-  const mode = (req.query.mode || req.body.mode || '').toUpperCase();
+  const targetMode = (req.query.mode || req.body.mode || '').toUpperCase();
   const lat = req.query.lat || req.body.lat ? parseFloat(req.query.lat || req.body.lat) : null;
   const lon = req.query.lon || req.body.lon ? parseFloat(req.query.lon || req.body.lon) : null;
+  const user = req.user;
 
-  if (!['PARKED', 'OWNER', 'BORROWER'].includes(mode)) {
+  if (!['PARKED', 'OWNER', 'BORROWER'].includes(targetMode)) {
     return res.status(400).json({ status: "error", message: "Invalid mode. Use PARKED, OWNER, or BORROWER." });
   }
 
-  const success = await setNotehubConfig(mode, lat, lon);
+  // Role Permission Enforcement: Borrowers cannot set OWNER mode
+  if (user.role === "BORROWER" && targetMode === "OWNER") {
+    await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, 
+      `Permission Denied: User ${user.name} (Borrower Group) attempted to switch system to OWNER mode.`, 
+      { headers: { 'Title': '⛔ ACCESS DENIED', 'Priority': '4', 'Tags': 'no_entry' } }
+    );
+    return res.status(403).json({ status: "error", message: "Borrower accounts are restricted from selecting OWNER mode." });
+  }
+
+  const success = await setNotehubConfig(targetMode, lat, lon);
   if (success) {
-    await sendInboundNoteToMCU({ verified: true, mode: mode });
+    await sendInboundNoteToMCU({ verified: true, mode: targetMode, user: user.name });
 
-    await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, `Operating mode updated to ${mode} (2FA Bypass Mode active). System disarmed.`, {
-      headers: { 'Title': `✅ MODE CHANGED TO ${mode}`, 'Priority': '3', 'Tags': 'gear,white_check_mark' }
-    });
+    await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, 
+      `2FA Verified for ${user.name} (${user.role}). Mode set to ${targetMode}. System disarmed.`, 
+      { headers: { 'Title': `✅ MODE UPDATED BY ${user.name.toUpperCase()}`, 'Priority': '3', 'Tags': 'gear,white_check_mark' } }
+    );
 
-    return res.json({ status: "success", mode: mode, message: `System mode changed to ${mode}` });
+    return res.json({ status: "success", mode: targetMode, user: user.name, message: `System mode updated to ${targetMode} by ${user.name}` });
   } else {
     return res.status(500).json({ status: "error", message: "Failed to update configuration in Notehub." });
   }
 });
 
+// Endpoint: General 2FA Disarm signal
 app.all('/verify-2fa', verifyTotpMiddleware, async (req, res) => {
-  await sendInboundNoteToMCU({ verified: true });
+  const user = req.user;
+  
+  // If a borrower disarms the alarm, enforce BORROWER mode by default
+  let resolvedMode = user.role === "BORROWER" ? "BORROWER" : "OWNER";
+  
+  await setNotehubConfig(resolvedMode);
+  await sendInboundNoteToMCU({ verified: true, user: user.name, mode: resolvedMode });
 
-  await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, `Disarm signal verified (2FA Bypass Mode active)! Alarms cleared.`, {
-    headers: { 'Title': '✅ DISARM VERIFIED', 'Priority': '3', 'Tags': 'shield,white_check_mark' }
-  });
+  await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, 
+    `Disarm verified for ${user.name} (${user.role} Group). Mode automatically updated to ${resolvedMode}. Alarms cleared.`, 
+    { headers: { 'Title': `✅ DISARMED BY ${user.name.toUpperCase()}`, 'Priority': '3', 'Tags': 'shield,white_check_mark' } }
+  );
 
-  return res.json({ status: "success", message: "Disarm verified and dispatched to MCU." });
+  return res.json({ status: "success", user: user.name, mode: resolvedMode, message: "Disarm verified and dispatched to MCU." });
 });
 
+// Main Webhook for Notehub Outbound Alerts
 app.post('/notehub-webhook', async (req, res) => {
   const payload = req.body.body || req.body;
   const event = payload.event;
@@ -161,7 +221,7 @@ app.post('/notehub-webhook', async (req, res) => {
     const baseline = payload.baseline || "Unknown";
     const current = payload.current || "Unknown";
     alertTitle = `⚠️ MOVEMENT DETECTED: TILT CHANGED`;
-    alertMessage = `Bike shifted from parked position!\nBaseline: ${baseline} ➔ Current: ${current}\nGrid: ${lat}, ${lon}\nEnter 6-digit TOTP pin below to disarm/switch mode!`;
+    alertMessage = `Bike shifted from parked position!\nBaseline: ${baseline} ➔ Current: ${current}\nGrid: ${lat}, ${lon}\nEnter your 6-digit 2FA pin below to disarm:`;
     priority = 4;
     tags = ["warning", "rotating_light"];
   } 
@@ -196,7 +256,6 @@ app.post('/notehub-webhook', async (req, res) => {
   }
 
   try {
-    // 4 Action Buttons configured with $input fields for TOTP code submission
     const actions = [
       {
         action: "http",
@@ -249,4 +308,4 @@ app.post('/notehub-webhook', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`HSG18MS Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`HSG18MS Multi-User Server running on port ${PORT}`));
