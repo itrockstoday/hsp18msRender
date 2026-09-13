@@ -10,16 +10,6 @@ authenticator.options = { window: 1 };
 
 const NTFY_TOPIC = process.env.NTFY_TOPIC_NAME || 'hspg18ms_alerts_3486';
 
-/* 
-  USER REGISTRY CONFIGURATION (Environment Variable: USER_REGISTRY_JSON)
-  Expected JSON structure inside Render Environment Variables:
-  [
-    { "name": "Primary Owner", "secret": "JBSWY3DPEHPK3PXP", "role": "OWNER" },
-    { "name": "Brother", "secret": "HXDMVJECJJW9833D", "role": "OWNER" },
-    { "name": "Friend Alex", "secret": "KRSXG5CTMVRXEZLU", "role": "BORROWER" },
-    { "name": "Friend Sam", "secret": "MZXXE5DFOR2XEZLU", "role": "BORROWER" }
-  ]
-*/
 function getUsers() {
   const jsonStr = process.env.USER_REGISTRY_JSON;
   if (!jsonStr) {
@@ -131,7 +121,6 @@ async function verifyTotpMiddleware(req, res, next) {
   next();
 }
 
-// Endpoint: Set mode with 2FA verification
 app.all('/set-mode', verifyTotpMiddleware, async (req, res) => {
   const targetMode = (req.query.mode || req.body.mode || '').toUpperCase();
   const lat = req.query.lat || req.body.lat ? parseFloat(req.query.lat || req.body.lat) : null;
@@ -165,7 +154,6 @@ app.all('/set-mode', verifyTotpMiddleware, async (req, res) => {
   }
 });
 
-// Endpoint: Disarm with 2FA verification
 app.all('/verify-2fa', verifyTotpMiddleware, async (req, res) => {
   const user = req.user;
   let resolvedMode = user.role === "BORROWER" ? "BORROWER" : "OWNER";
@@ -181,23 +169,25 @@ app.all('/verify-2fa', verifyTotpMiddleware, async (req, res) => {
   return res.json({ status: "success", user: user.name, mode: resolvedMode, message: "Disarm verified and dispatched to MCU." });
 });
 
-// Main Webhook Receiver from Notehub
 app.post('/notehub-webhook', async (req, res) => {
+  console.log("Inbound Notehub Event Received:", JSON.stringify(req.body));
+  
   const payload = req.body.body || req.body;
   const event = payload.event;
 
-  if (!event) return res.status(200).json({ status: "ignored_internal_system_note" });
+  if (!event) {
+    console.log("No 'event' string in payload. Ignored.");
+    return res.status(200).json({ status: "ignored_no_event" });
+  }
 
   const rawLat = payload.lat || 0;
   const rawLon = payload.lon || 0;
   
-  // Format to high-precision coordinate strings
   const latStr = rawLat !== 0 ? rawLat.toFixed(8) : "No GPS Lock";
   const lonStr = rawLon !== 0 ? rawLon.toFixed(8) : "No GPS Lock";
   const mode = payload.mode || "PARKED";
   const mapsUrl = rawLat !== 0 ? `https://maps.google.com/?q=${rawLat},${rawLon}` : `https://ntfy.sh/${NTFY_TOPIC}`;
-  
-  const externalUrl = process.env.RENDER_EXTERNAL_URL || 'https://your-render-app.onrender.com';
+  const externalUrl = process.env.RENDER_EXTERNAL_URL || 'https://hsp18msrender.onrender.com';
 
   let alertTitle = "";
   let alertMessage = "";
@@ -205,45 +195,44 @@ app.post('/notehub-webhook', async (req, res) => {
   let tags = [];
   let includeButtons = true;
 
-  // 1. BOOT / STARTUP NOTIFICATION (NO 2FA REQUIRED)
   if (event === "boot_location_captured") {
     alertTitle = `🅿️ MOTORCYCLE ONLINE [PARKED MODE]`;
-    alertMessage = `System powered on and active.\nMode: PARKED\nGPS Coordinates:\nLatitude: ${latStr}\nLongitude: ${lonStr}`;
+    alertMessage = `Blues Feather Kit Reset / Boot Detected.\nMode: PARKED\nLatitude: ${latStr}\nLongitude: ${lonStr}`;
     priority = 3;
     tags = ["motorcycle", "round_pushpin"];
-    includeButtons = false; // No 2FA buttons required for basic startup push
+    includeButtons = false;
   } 
   else if (event === "parked_tilt_moved") {
     const baseline = payload.baseline || "Unknown";
     const current = payload.current || "Unknown";
     alertTitle = `⚠️ MOVEMENT DETECTED: TILT CHANGED`;
-    alertMessage = `Motorcycle shifted from parked position!\nBaseline: ${baseline} ➔ Current: ${current}\nLocation: ${latStr}, ${lonStr}\nTap button below to enter 6-digit 2FA PIN:`;
+    alertMessage = `Motorcycle shifted from parked position!\nBaseline: ${baseline} ➔ Current: ${current}\nLocation: ${latStr}, ${lonStr}`;
     priority = 4;
     tags = ["warning", "rotating_light"];
   } 
   else if (event === "geofence_warning_30mi") {
     const dist = payload.distance || 0;
     alertTitle = `⚠️ 30-MILE GEOFENCE WARNING`;
-    alertMessage = `Borrower Notice: ${dist.toFixed(1)} miles from Home Location.\nWithin 10 miles of limit (40-mile max).`;
+    alertMessage = `Borrower Notice: ${dist.toFixed(1)} miles from Home Location.`;
     priority = 3;
     tags = ["warning", "compass"];
   }
   else if (event === "geofence_breach_40mi") {
     const dist = payload.distance || 0;
-    alertTitle = `⛔ 40-MILE GEOFENCE BREACH (OWNER ALERT)`;
+    alertTitle = `⛔ 40-MILE GEOFENCE BREACH`;
     alertMessage = `CRITICAL: Borrower exceeded 40-mile limit!\nDistance: ${dist.toFixed(1)} miles.\nLocation: ${latStr}, ${lonStr}`;
     priority = 5;
     tags = ["no_entry_sign", "siren"];
   }
   else if (event === "security_breach") {
     alertTitle = `⛔ 2FA SECURITY BREACH`;
-    alertMessage = `SECURITY BREACH TRIGGERED!\nNo 2FA PIN provided within 2 minutes.\nEnter 2FA PIN below to clear breach or change mode.\nLocation: ${latStr}, ${lonStr}`;
+    alertMessage = `SECURITY BREACH TRIGGERED!\nNo 2FA PIN provided within 2 minutes.\nLocation: ${latStr}, ${lonStr}`;
     priority = 5;
     tags = ["siren", "no_entry"];
   } 
   else if (event === "tracking_update") {
     alertTitle = `📡 GPS TRACKING UPDATE`;
-    alertMessage = `Active GPS Tracking Fix Established!\nMode: ${mode}\nLocation: ${latStr}, ${lonStr}`;
+    alertMessage = `Active GPS Tracking Update\nMode: ${mode}\nLocation: ${latStr}, ${lonStr}`;
     priority = 3;
     tags = ["compass", "satellite"];
   } 
@@ -251,61 +240,70 @@ app.post('/notehub-webhook', async (req, res) => {
     return res.status(200).json({ status: "unhandled_event_type" });
   }
 
+  const ntfyPayload = {
+    topic: NTFY_TOPIC,
+    title: alertTitle,
+    message: alertMessage,
+    priority: priority,
+    tags: tags,
+    click: mapsUrl
+  };
+
+  if (includeButtons) {
+    ntfyPayload.actions = [
+      {
+        action: "http",
+        label: "🔑 Disarm",
+        url: `${externalUrl}/verify-2fa`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: "$input" })
+      },
+      {
+        action: "http",
+        label: "🅿️ Set PARKED",
+        url: `${externalUrl}/set-mode`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "PARKED", code: "$input" })
+      },
+      {
+        action: "http",
+        label: "🔓 Set OWNER",
+        url: `${externalUrl}/set-mode`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "OWNER", code: "$input" })
+      },
+      {
+        action: "http",
+        label: "🚲 Set BORROWER",
+        url: `${externalUrl}/set-mode`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "BORROWER", code: "$input" })
+      }
+    ];
+  }
+
   try {
-    const ntfyPayload = {
-      topic: NTFY_TOPIC,
-      title: alertTitle,
-      message: alertMessage,
-      priority: priority,
-      tags: tags,
-      click: mapsUrl
-    };
-
-    // Standard ntfy Action Buttons Header Format (Works on iOS, Android, and Web)
-    if (includeButtons) {
-      ntfyPayload.actions = [
-        {
-          action: "http",
-          label: "🔑 Disarm",
-          url: `${externalUrl}/verify-2fa`,
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code: "$input" })
-        },
-        {
-          action: "http",
-          label: "🅿️ Set PARKED",
-          url: `${externalUrl}/set-mode`,
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: "PARKED", code: "$input" })
-        },
-        {
-          action: "http",
-          label: "🔓 Set OWNER",
-          url: `${externalUrl}/set-mode`,
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: "OWNER", code: "$input" })
-        },
-        {
-          action: "http",
-          label: "🚲 Set BORROWER",
-          url: `${externalUrl}/set-mode`,
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: "BORROWER", code: "$input" })
-        }
-      ];
-    }
-
     await axios.post('https://ntfy.sh', ntfyPayload);
+    console.log(`ntfy notification pushed successfully for event: ${event}`);
     return res.status(200).json({ status: "success", event: event });
   } catch (error) {
-    console.error("ntfy dispatch error:", error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    console.error("ntfy dispatch error (Retrying without buttons):", error.message);
+    // Fallback: Send alert without action buttons if payload was rejected
+    delete ntfyPayload.actions;
+    try {
+      await axios.post('https://ntfy.sh', ntfyPayload);
+      console.log(`Fallback ntfy push succeeded without buttons for event: ${event}`);
+      return res.status(200).json({ status: "success_fallback", event: event });
+    } catch (fallbackError) {
+      console.error("Fallback ntfy dispatch failed:", fallbackError.message);
+      return res.status(500).json({ status: "error", message: fallbackError.message });
+    }
   }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`HSG18MS Server active on port ${PORT}`));
+app.listen(PORT, () => console.log(`HSG18MS Webhook Listener running on port ${PORT}`));
