@@ -4,14 +4,13 @@ const { authenticator } = require('otplib');
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Enable +/- 1 window tolerance (30s time-drift window) for TOTP verification
 authenticator.options = { window: 1 };
 
 const NTFY_TOPIC = process.env.NTFY_TOPIC_NAME || 'hspg18ms_alerts_3486';
 const TOTP_SECRET = process.env.TOTP_SECRET;
 
-// Dispatch alert when 2FA authentication fails
 async function sendFailedAuthNotification(attemptedCode, endpointName) {
   try {
     await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, 
@@ -29,7 +28,6 @@ async function sendFailedAuthNotification(attemptedCode, endpointName) {
   }
 }
 
-// Update Notehub environment variables
 async function setNotehubConfig(newMode, customLat = null, customLon = null) {
   const projectUid = process.env.NOTEHUB_PROJECT_UID;
   const authToken = process.env.NOTEHUB_AUTH_TOKEN;
@@ -55,7 +53,6 @@ async function setNotehubConfig(newMode, customLat = null, customLon = null) {
   }
 }
 
-// Queue inbound disarm note to the MCU
 async function sendInboundNoteToMCU(bodyData) {
   const projectUid = process.env.NOTEHUB_PROJECT_UID;
   const deviceUid = process.env.NOTEHUB_DEVICE_UID;
@@ -74,75 +71,69 @@ async function sendInboundNoteToMCU(bodyData) {
   }
 }
 
-// Express Middleware for 2FA validation
+function extractTotpCode(req) {
+  if (req.query && req.query.code) return req.query.code.trim();
+  if (req.body && req.body.code) return req.body.code.trim();
+  return null;
+}
+
+// --------------------------------------------------------------------------
+// 2FA TOTP Middleware (Temporarily Commented Out for Active Testing Phase)
+// --------------------------------------------------------------------------
 async function verifyTotpMiddleware(req, res, next) {
+  /*
   if (!TOTP_SECRET) return res.status(500).send("Server configuration error: TOTP secret missing.");
 
-  const code = req.query.code;
+  const code = extractTotpCode(req);
   if (!code) {
     await sendFailedAuthNotification("MISSING_CODE", req.path);
-    return res.status(401).send(`
-      <div style="font-family: sans-serif; text-align: center; padding: 40px;">
-        <h1 style="color: #d32f2f;">401 Unauthorized</h1>
-        <p>Missing 6-digit 2FA code. Append <b>?code=123456</b> to your request.</p>
-      </div>
-    `);
+    return res.status(401).json({ status: "error", message: "Missing 6-digit TOTP code." });
   }
 
-  const isValid = authenticator.check(code.trim(), TOTP_SECRET);
+  const isValid = authenticator.check(code, TOTP_SECRET);
   if (!isValid) {
     await sendFailedAuthNotification(code, req.path);
-    return res.status(401).send(`
-      <div style="font-family: sans-serif; text-align: center; padding: 40px;">
-        <h1 style="color: #d32f2f;">401 Unauthorized (Invalid 2FA Code)</h1>
-        <p>The code <b>${code}</b> is invalid or expired. Please generate a fresh code in your 2FA app.</p>
-      </div>
-    `);
+    return res.status(401).json({ status: "error", message: `Invalid or expired 2FA code: ${code}` });
   }
+  */
 
+  // Bypass 2FA check during testing phase
   next();
 }
 
-// GET Endpoint to update operational mode
-app.get('/set-mode', verifyTotpMiddleware, async (req, res) => {
-  const mode = (req.query.mode || '').toUpperCase();
-  const lat = req.query.lat ? parseFloat(req.query.lat) : null;
-  const lon = req.query.lon ? parseFloat(req.query.lon) : null;
+app.all('/set-mode', verifyTotpMiddleware, async (req, res) => {
+  const mode = (req.query.mode || req.body.mode || '').toUpperCase();
+  const lat = req.query.lat || req.body.lat ? parseFloat(req.query.lat || req.body.lat) : null;
+  const lon = req.query.lon || req.body.lon ? parseFloat(req.query.lon || req.body.lon) : null;
 
   if (!['PARKED', 'OWNER', 'BORROWER'].includes(mode)) {
-    return res.status(400).send("Invalid mode specified. Use PARKED, OWNER, or BORROWER.");
+    return res.status(400).json({ status: "error", message: "Invalid mode. Use PARKED, OWNER, or BORROWER." });
   }
 
   const success = await setNotehubConfig(mode, lat, lon);
   if (success) {
-    let locMsg = (mode === 'BORROWER' && lat && lon) 
-      ? `<p>Borrower Home Location set to: <b>${lat}, ${lon}</b></p>` 
-      : (mode === 'BORROWER') ? `<p>Borrower Home Location will automatically pin to current device location.</p>` : '';
+    await sendInboundNoteToMCU({ verified: true, mode: mode });
 
-    return res.send(`
-      <div style="font-family: sans-serif; text-align: center; padding: 40px;">
-        <h1 style="color: #2e7d32;">Mode Successfully Changed to: ${mode}</h1>
-        ${locMsg}
-        <p>2FA Authenticated. The Cygnet MCU will sync with Notehub shortly.</p>
-      </div>
-    `);
+    await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, `Operating mode updated to ${mode} (2FA Bypass Mode active). System disarmed.`, {
+      headers: { 'Title': `✅ MODE CHANGED TO ${mode}`, 'Priority': '3', 'Tags': 'gear,white_check_mark' }
+    });
+
+    return res.json({ status: "success", mode: mode, message: `System mode changed to ${mode}` });
   } else {
-    return res.status(500).send("Failed to update configuration in Notehub.");
+    return res.status(500).json({ status: "error", message: "Failed to update configuration in Notehub." });
   }
 });
 
-// GET Endpoint to clear active security breaches
-app.get('/verify-2fa', verifyTotpMiddleware, async (req, res) => {
+app.all('/verify-2fa', verifyTotpMiddleware, async (req, res) => {
   await sendInboundNoteToMCU({ verified: true });
-  return res.send(`
-    <div style="font-family: sans-serif; text-align: center; padding: 40px;">
-      <h1 style="color: #2e7d32;">2FA Disarm Verified!</h1>
-      <p>Identity confirmed. Tilt / Movement alarm disarmed via cellular.</p>
-    </div>
-  `);
+
+  await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, `Disarm signal verified (2FA Bypass Mode active)! Alarms cleared.`, {
+    headers: { 'Title': '✅ DISARM VERIFIED', 'Priority': '3', 'Tags': 'shield,white_check_mark' }
+  });
+
+  return res.json({ status: "success", message: "Disarm verified and dispatched to MCU." });
 });
 
-// Webhook endpoint to consume Notehub alerts and push to ntfy.sh
 app.post('/notehub-webhook', async (req, res) => {
   const payload = req.body.body || req.body;
   const event = payload.event;
@@ -158,7 +149,7 @@ app.post('/notehub-webhook', async (req, res) => {
 
   let alertTitle = "";
   let alertMessage = "";
-  let priority = "3";
+  let priority = 3;
   let tags = [];
 
   if (event === "boot_location_captured") {
@@ -170,51 +161,85 @@ app.post('/notehub-webhook', async (req, res) => {
     const baseline = payload.baseline || "Unknown";
     const current = payload.current || "Unknown";
     alertTitle = `⚠️ MOVEMENT DETECTED: TILT CHANGED`;
-    alertMessage = `Bike shifted from parked position!\nBaseline: ${baseline} ➔ Current: ${current}\nGrid: ${lat}, ${lon}\n2FA PIN required within 2 minutes!`;
-    priority = "4";
+    alertMessage = `Bike shifted from parked position!\nBaseline: ${baseline} ➔ Current: ${current}\nGrid: ${lat}, ${lon}\nEnter 6-digit TOTP pin below to disarm/switch mode!`;
+    priority = 4;
     tags = ["warning", "rotating_light"];
   } 
   else if (event === "geofence_warning_30mi") {
     const dist = payload.distance || 0;
     alertTitle = `⚠️ 30-MILE GEOFENCE WARNING`;
     alertMessage = `Borrower Notice: ${dist.toFixed(1)} miles from Home Location.\nWithin 10 miles of max allowed area (40-mile limit).`;
-    priority = "3";
+    priority = 3;
     tags = ["warning", "compass"];
   }
   else if (event === "geofence_breach_40mi") {
     const dist = payload.distance || 0;
     alertTitle = `⛔ 40-MILE GEOFENCE BREACH (OWNER ALERT)`;
     alertMessage = `CRITICAL: Borrower exceeded 40-mile limit!\nDistance: ${dist.toFixed(1)} miles.\nGrid: ${lat}, ${lon}`;
-    priority = "5";
+    priority = 5;
     tags = ["no_entry_sign", "siren"];
   }
   else if (event === "security_breach") {
     alertTitle = `⛔ 2FA SECURITY BREACH`;
-    alertMessage = `SECURITY BREACH HAS BEEN TRIGGERED!\nNo 2FA PIN provided within 2 minutes.\nEnter 2FA PIN to stop security breach notifications.\nGrid: ${lat}, ${lon}`;
-    priority = "5";
+    alertMessage = `SECURITY BREACH HAS BEEN TRIGGERED!\nNo 2FA PIN provided within 2 minutes.\nEnter 2FA PIN below to clear breach or switch modes.\nGrid: ${lat}, ${lon}`;
+    priority = 5;
     tags = ["siren", "no_entry"];
   } 
   else if (event === "tracking_update") {
-    alertTitle = `📡 SECURITY BREACH: GPS UPDATE`;
-    alertMessage = `ALERT: 2FA Security Breach Active!\nUpdated Grid: ${lat}, ${lon}\nEnter 2FA PIN to stop notifications.`;
-    priority = "5";
-    tags = ["compass", "warning"];
+    alertTitle = `📡 GPS TRACKING UPDATE`;
+    alertMessage = `Active GPS Tracking Fix Established!\nMode: ${mode}\nGrid: ${lat}, ${lon}`;
+    priority = 3;
+    tags = ["compass", "satellite"];
   } 
   else {
     return res.status(200).json({ status: "unhandled_event_type" });
   }
 
   try {
-    const secureDisarmUrl = `${externalUrl}/verify-2fa`;
-
-    await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, alertMessage, {
-      headers: {
-        'Title': alertTitle,
-        'Priority': priority,
-        'Tags': tags.join(','),
-        'Click': mapsUrl,
-        'Actions': `view, Enter 2FA PIN, ${secureDisarmUrl}`
+    // 4 Action Buttons configured with $input fields for TOTP code submission
+    const actions = [
+      {
+        action: "http",
+        label: "🔑 Disarm Alarm",
+        url: `${externalUrl}/verify-2fa`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: "$input" })
+      },
+      {
+        action: "http",
+        label: "🅿️ Set PARKED",
+        url: `${externalUrl}/set-mode`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "PARKED", code: "$input" })
+      },
+      {
+        action: "http",
+        label: "🔓 Set OWNER",
+        url: `${externalUrl}/set-mode`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "OWNER", code: "$input" })
+      },
+      {
+        action: "http",
+        label: "🚲 Set BORROWER",
+        url: `${externalUrl}/set-mode`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "BORROWER", code: "$input" })
       }
+    ];
+
+    await axios.post('https://ntfy.sh', {
+      topic: NTFY_TOPIC,
+      title: alertTitle,
+      message: alertMessage,
+      priority: priority,
+      tags: tags,
+      click: mapsUrl,
+      actions: actions
     });
 
     return res.status(200).json({ status: "success", event: event });
@@ -224,4 +249,4 @@ app.post('/notehub-webhook', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Secure TOTP 2FA Service active on port ${PORT}`));
+app.listen(PORT, () => console.log(`HSG18MS Server running on port ${PORT}`));

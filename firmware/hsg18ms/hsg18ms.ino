@@ -9,7 +9,7 @@
 Notecard notecard;
 
 enum OperatingMode {
-  MODE_PARKED,   // DEFAULT: Parked baseline tilt sensing active
+  MODE_PARKED,   // DEFAULT: Parked baseline tilt/orientation sensing active
   MODE_OWNER,    // UNRESTRICTED: All movement/tilt alarms disabled
   MODE_BORROWER  // GEOFENCED: 30-mi warning & 40-mi breach tracking active, tilt alarms disabled
 };
@@ -58,18 +58,18 @@ void setup() {
   JAddBoolToObject(req, "sync", true);
   notecard.sendRequest(req);
 
-  // 2. Clear stale cache to force fresh GNSS lock
+  // 2. Clear stale location cache to force satellite search
   req = notecard.newRequest("card.location.dispatch");
   JAddBoolToObject(req, "reset", true);
   notecard.sendRequest(req);
 
-  // 3. High-Precision GNSS / Active Antenna Configuration
+  // 3. High-Precision GNSS / Active Antenna Configuration (Bingfu LNA Active Power)
   req = notecard.newRequest("card.location.mode");
   JAddStringToObject(req, "mode", "continuous"); // Continuous engine mode forces active satellite scanning
   JAddBoolToObject(req, "vbias", true);          // Powers 3.3V active antenna LNA
   JAddBoolToObject(req, "active", true);         // Active antenna circuit enabled
-  JAddBoolToObject(req, "high", true);           // Force high-accuracy 1-meter multi-constellation fix
-  JAddNumberToObject(req, "max", 180);           // Allow up to 180s search window for fresh fix
+  JAddBoolToObject(req, "high", true);           // Force high-accuracy fix
+  JAddNumberToObject(req, "max", 180);           // Extend max search window to 180 seconds
   notecard.sendRequest(req);
 
   // 4. Motion & Orientation Sensing Setup
@@ -79,9 +79,10 @@ void setup() {
   JAddBoolToObject(req, "start", true);
   notecard.sendRequest(req);
 
+  // Sync mode and coordinates set remotely from server
   syncOperatingModeFromNotehub();
 
-  usbSerial.println("\n[BOOT] System Power On. Defaulting to PARKED Mode...");
+  usbSerial.println("\n[BOOT] System Power On. Mode synchronized.");
 
   if (currentMode == MODE_PARKED) {
     captureParkedBaselineOrientation();
@@ -101,14 +102,15 @@ void setup() {
 
 void loop() {
   OperatingMode previousMode = currentMode;
+  
+  // Synchronize remote settings and inbound server disarms
   syncOperatingModeFromNotehub();
+  checkIncoming2FA();
 
   // Reset parked baseline orientation if mode changed to PARKED or baseline missing
   if (currentMode == MODE_PARKED && (previousMode != MODE_PARKED || !baselineCaptured)) {
     captureParkedBaselineOrientation();
   }
-
-  checkIncoming2FA();
 
   // OWNER MODE: Fully disarmed
   if (currentMode == MODE_OWNER) {
@@ -125,13 +127,13 @@ void loop() {
       J *req = notecard.newRequest("card.motion");
       J *rsp = notecard.requestAndResponse(req);
 
-      if (rsp && !NoteResponseError(rsp)) {
+      if (rsp && !notecard.responseError(rsp)) {
         const char *currentOrientation = JGetString(rsp, "status");
 
         if (currentOrientation && strlen(currentOrientation) > 0) {
           if (strcmp(currentOrientation, parkedBaselineOrientation) != 0) {
             usbSerial.printf("\n[ALERT] Parked Position Shifted! Baseline: %s | Current: %s\n", 
-                               parkedBaselineOrientation, currentOrientation);
+                           parkedBaselineOrientation, currentOrientation);
 
             sendAlertNote("parked_tilt_moved", parkedBaselineOrientation, currentOrientation);
             currentState = STATE_AWAITING_2FA;
@@ -199,7 +201,7 @@ void captureParkedBaselineOrientation() {
   J *req = notecard.newRequest("card.motion");
   J *rsp = notecard.requestAndResponse(req);
 
-  if (rsp && !NoteResponseError(rsp)) {
+  if (rsp && !notecard.responseError(rsp)) {
     const char *orient = JGetString(rsp, "status");
     if (orient && strlen(orient) > 0) {
       strncpy(parkedBaselineOrientation, orient, sizeof(parkedBaselineOrientation) - 1);
@@ -236,7 +238,7 @@ void syncOperatingModeFromNotehub() {
   JAddStringToObject(req, "name", "app_mode");
   J *rsp = notecard.requestAndResponse(req);
 
-  if (rsp && !NoteResponseError(rsp)) {
+  if (rsp && !notecard.responseError(rsp)) {
     const char *modeStr = JGetString(rsp, "text");
     if (modeStr) {
       if (strcmp(modeStr, "OWNER") == 0) currentMode = MODE_OWNER;
@@ -249,7 +251,7 @@ void syncOperatingModeFromNotehub() {
   req = notecard.newRequest("env.get");
   JAddStringToObject(req, "name", "borrower_home_lat");
   rsp = notecard.requestAndResponse(req);
-  if (rsp && !NoteResponseError(rsp)) {
+  if (rsp && !notecard.responseError(rsp)) {
     const char *latStr = JGetString(rsp, "text");
     if (latStr && strlen(latStr) > 0) borrowerOriginLat = atof(latStr);
   }
@@ -258,7 +260,7 @@ void syncOperatingModeFromNotehub() {
   req = notecard.newRequest("env.get");
   JAddStringToObject(req, "name", "borrower_home_lon");
   rsp = notecard.requestAndResponse(req);
-  if (rsp && !NoteResponseError(rsp)) {
+  if (rsp && !notecard.responseError(rsp)) {
     const char *lonStr = JGetString(rsp, "text");
     if (lonStr && strlen(lonStr) > 0) borrowerOriginLon = atof(lonStr);
   }
@@ -271,7 +273,7 @@ bool waitForGpsLock(double &lat, double &lon, int maxWaitSeconds) {
     J *req = notecard.newRequest("card.location");
     J *rsp = notecard.requestAndResponse(req);
 
-    if (rsp && !NoteResponseError(rsp)) {
+    if (rsp && !notecard.responseError(rsp)) {
       int sats = JGetInt(rsp, "sats");
       int accuracy = JGetInt(rsp, "accuracy");
 
@@ -300,7 +302,7 @@ void sendAlertNote(const char *eventType, const char *baselineStr, const char *c
   J *rsp = notecard.requestAndResponse(req);
 
   double lat = 0.0, lon = 0.0;
-  if (rsp && !NoteResponseError(rsp)) {
+  if (rsp && !notecard.responseError(rsp)) {
     lat = JGetNumber(rsp, "lat");
     lon = JGetNumber(rsp, "lon");
   }
@@ -334,10 +336,10 @@ void checkIncoming2FA() {
   JAddBoolToObject(req, "delete", true);
   J *rsp = notecard.requestAndResponse(req);
 
-  if (rsp && !NoteResponseError(rsp)) {
+  if (rsp && !notecard.responseError(rsp)) {
     J *body = JGetObject(rsp, "body");
     if (body && JGetBool(body, "verified")) {
-      usbSerial.println("\n[SECURITY] 2FA disarm verified over cellular. System disarmed.");
+      usbSerial.println("\n[SECURITY] Disarm signal verified over cellular. Resetting state to IDLE.");
       currentState = STATE_IDLE;
       if (currentMode == MODE_PARKED) {
         captureParkedBaselineOrientation();
