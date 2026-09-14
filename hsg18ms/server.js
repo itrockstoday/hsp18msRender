@@ -1,10 +1,10 @@
-const express = require('express');
-const axios = require('axios');
-const { authenticator } = require('otplib');
+import express, { json, urlencoded } from 'express';
+import { post, put } from 'axios';
+import { authenticator } from 'otplib';
 
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(json());
+app.use(urlencoded({ extended: true }));
 
 authenticator.options = { window: 1 };
 
@@ -40,7 +40,7 @@ function authenticateUser(code) {
 
 async function sendFailedAuthNotification(attemptedCode, endpointName) {
   try {
-    await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, 
+    await post(`https://ntfy.sh/${NTFY_TOPIC}`, 
       `Unauthorized 2FA attempt on endpoint '${endpointName}'. Code submitted: '${attemptedCode || 'None'}'`, 
       {
         headers: {
@@ -68,7 +68,7 @@ async function setNotehubConfig(newMode, customLat = null, customLon = null) {
   }
 
   try {
-    await axios.put(
+    await put(
       `https://api.notefile.net/v1/projects/${projectUid}/env`,
       { env: envPayload },
       { headers: { 'X-SESSION-TOKEN': authToken } }
@@ -88,7 +88,7 @@ async function sendInboundNoteToMCU(bodyData) {
   if (!projectUid || !deviceUid || !authToken) return;
 
   try {
-    await axios.post(
+    await post(
       `https://api.notefile.net/v1/projects/${projectUid}/devices/${deviceUid}/notes`,
       { file: "inbound.qi", body: bodyData },
       { headers: { 'X-SESSION-TOKEN': authToken } }
@@ -132,7 +132,7 @@ app.all('/set-mode', verifyTotpMiddleware, async (req, res) => {
   }
 
   if (user.role === "BORROWER" && targetMode === "OWNER") {
-    await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, 
+    await post(`https://ntfy.sh/${NTFY_TOPIC}`, 
       `Permission Denied: User ${user.name} (Borrower Group) attempted to switch system to OWNER mode.`, 
       { headers: { 'Title': '⛔ ACCESS DENIED', 'Priority': '4', 'Tags': 'no_entry' } }
     );
@@ -143,7 +143,7 @@ app.all('/set-mode', verifyTotpMiddleware, async (req, res) => {
   if (success) {
     await sendInboundNoteToMCU({ verified: true, mode: targetMode, user: user.name });
 
-    await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, 
+    await post(`https://ntfy.sh/${NTFY_TOPIC}`, 
       `2FA Verified for ${user.name} (${user.role}). Mode set to ${targetMode}.`, 
       { headers: { 'Title': `✅ MODE UPDATED BY ${user.name.toUpperCase()}`, 'Priority': '3', 'Tags': 'gear,white_check_mark' } }
     );
@@ -161,7 +161,7 @@ app.all('/verify-2fa', verifyTotpMiddleware, async (req, res) => {
   await setNotehubConfig(resolvedMode);
   await sendInboundNoteToMCU({ verified: true, user: user.name, mode: resolvedMode });
 
-  await axios.post(`https://ntfy.sh/${NTFY_TOPIC}`, 
+  await post(`https://ntfy.sh/${NTFY_TOPIC}`, 
     `Disarm verified for ${user.name} (${user.role} Group). Mode set to ${resolvedMode}. Alarms cleared.`, 
     { headers: { 'Title': `✅ DISARMED BY ${user.name.toUpperCase()}`, 'Priority': '3', 'Tags': 'shield,white_check_mark' } }
   );
@@ -249,32 +249,49 @@ app.post('/notehub-webhook', async (req, res) => {
   if (includeButtons) {
     ntfyPayload.actions = [
       {
-        action: "view",
+        action: "http",
         label: "🔑 Disarm System",
-        url: `${externalUrl}/verify-2fa?code=123456`
+        url: `${externalUrl}/verify-2fa?code=$input`,
+        method: "POST",
+        body: "",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" }
       },
       {
-        action: "view",
-        label: "🅿️ Set PARKED Mode",
-        url: `${externalUrl}/set-mode?mode=PARKED&code=123456`
+        action: "http",
+        label: "🅿️ Set PARKED",
+        url: `${externalUrl}/set-mode?mode=PARKED&code=$input`,
+        method: "POST",
+        body: "",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" }
       },
       {
-        action: "view",
-        label: "🔓 Set OWNER Mode",
-        url: `${externalUrl}/set-mode?mode=OWNER&code=123456`
+        action: "http",
+        label: "🔓 Set OWNER",
+        url: `${externalUrl}/set-mode?mode=OWNER&code=$input`,
+        method: "POST",
+        body: "",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" }
+      },
+      {
+        action: "http",
+        label: "🚲 Set BORROWER",
+        url: `${externalUrl}/set-mode?mode=BORROWER&code=$input`,
+        method: "POST",
+        body: "",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" }
       }
     ];
   }
 
   try {
-    await axios.post('https://ntfy.sh', ntfyPayload);
+    await post('https://ntfy.sh', ntfyPayload);
     console.log(`ntfy notification pushed successfully for event: ${event}`);
     return res.status(200).json({ status: "success", event: event });
   } catch (error) {
     console.error("ntfy dispatch error (Retrying without buttons):", error.message);
     delete ntfyPayload.actions;
     try {
-      await axios.post('https://ntfy.sh', ntfyPayload);
+      await post('https://ntfy.sh', ntfyPayload);
       console.log(`Fallback ntfy push succeeded for event: ${event}`);
       return res.status(200).json({ status: "success_fallback", event: event });
     } catch (fallbackError) {
