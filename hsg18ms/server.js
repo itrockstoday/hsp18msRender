@@ -101,7 +101,8 @@ app.post('/notehub-webhook', handleNotehubEvent);
  * Endpoint to Receive 2FA Code/Pin from your Python Web Page
  */
 const handle2FASubmission = async (req, res) => {
-  const pin = req.body?.pin || req.body?.code || req.body?.2fa || 'No PIN Provided';
+  // Corrected bracket syntax for property keys starting with numbers
+  const pin = req.body?.pin || req.body?.code || req.body?.['2fa'] || 'No PIN Provided';
   console.log(`[2FA SUBMISSION] Received 2FA Code from Python Web Page: ${pin}`);
 
   await sendNtfyAlert('🔑 2FA Verification Code', `Code Received: ${pin}`);
