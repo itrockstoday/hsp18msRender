@@ -10,11 +10,11 @@ const NTFY_TOPIC = process.env.NTFY_TOPIC || 'my_alerts';
 
 /**
  * Sends a push notification to ntfy.sh
- * Ensures URL string manipulation is handled defensively to prevent HTTP 400 Bad Request errors.
+ * Properly formats JSON payload with action buttons and extracts raw topic name.
  */
 async function sendNtfyAlert(title, message, includeButton = true) {
   try {
-    // Sanitize NTFY_TOPIC: Extract topic name if user provided full URL in environment variables
+    // Clean topic name in case full URL was passed in process.env.NTFY_TOPIC
     const rawTopic = NTFY_TOPIC.replace(/^https?:\/\/ntfy\.sh\//i, '').trim();
 
     const payload = {
@@ -34,7 +34,7 @@ async function sendNtfyAlert(title, message, includeButton = true) {
       ];
     }
 
-    // POST directly to ntfy root endpoint using sanitized JSON body
+    // Send payload directly to ntfy.sh
     const response = await axios.post('https://ntfy.sh', payload, {
       headers: { 
         'Content-Type': 'application/json' 
@@ -43,50 +43,59 @@ async function sendNtfyAlert(title, message, includeButton = true) {
 
     console.log(`[NTFY SUCCESS] Notification sent: "${title}" (Status: ${response.status})`);
   } catch (err) {
-    console.error('[NTFY ERROR] Primary dispatch failed:', err.response?.data || err.message);
+    console.error('[NTFY ERROR] Dispatch failed:', err.response?.data || err.message);
 
     // Fallback attempt without action buttons if primary request fails
     if (includeButton) {
-      console.log('[NTFY RETRY] Retrying without interactive buttons...');
+      console.log('[NTFY RETRY] Retrying dispatch without action buttons...');
       await sendNtfyAlert(title, message, false);
     }
   }
 }
 
 /**
- * Webhook Ingestion Endpoint for Notehub Events
+ * Shared Inbound Notehub Event Handler
  */
-app.post('/', async (req, res) => {
+async function handleNotehubEvent(req, res) {
   const event = req.body;
-  console.log(`[NOTEHUB EVENT] Inbound Event Received: File=${event.file}, Event=${event.body?.event}`);
+  console.log(`[NOTEHUB EVENT] Inbound Event: Path=${req.path}, File=${event.file}, Event=${event.body?.event || 'N/A'}`);
 
-  // Instantly respond to Notehub to prevent timeout retries
+  // Acknowledge Notehub immediately with 200 OK so it doesn't log routing errors
   res.status(200).send({ status: 'received' });
 
-  // Handle Notehub file triggers
   const file = event.file || '';
   const eventData = event.body || {};
 
+  // Process Notefile Types
   if (file === 'alerts.qo') {
-    const alertType = eventData.event || 'Security Alert';
-    const location = eventData.location || 'Unknown Location';
+    const alertType = eventData.event || 'Security / Motion Alert';
+    const location = eventData.location || 'Parked Location';
     
     console.log(`[ALERT DISPATCH] Processing alert from ${file}: ${alertType}`);
-    await sendNtfyAlert(`Security Trigger: ${alertType}`, `Alert triggered at ${location}. Check control panel.`);
+    await sendNtfyAlert(`Alert: ${alertType}`, `Location update / trigger reported at ${location}.`);
   } else if (file === '_track.qo') {
-    console.log('[TELEMETRY] Routine telemetry received (_track.qo). No ntfy alert required.');
+    console.log('[TELEMETRY] Location tracking event received (_track.qo).');
+    
+    // If park/power state is sent inside _track.qo, trigger notification
+    if (eventData.event === 'parked' || eventData.status === 'power_on') {
+      await sendNtfyAlert('Vehicle Parked / Power On', `Status update received from device.`);
+    }
   } else {
-    console.log(`[NOTEHUB] Ignored unhandled notefile: ${file}`);
+    console.log(`[NOTEHUB] Ignored unhandled file: ${file}`);
   }
-});
+}
+
+// Support both / and /notehub-webhook endpoints to ensure Notehub never receives a 404
+app.post('/', handleNotehubEvent);
+app.post('/notehub-webhook', handleNotehubEvent);
 
 /**
- * Manual Testing Endpoint for 2FA Request
+ * Manual Testing Endpoint
  */
 app.post('/trigger-2fa-request', async (req, res) => {
-  console.log('[MANUAL TEST] Triggering 2FA alert test...');
-  await sendNtfyAlert('2FA Authentication Requested', 'A verification code is required to approve access.');
-  res.status(200).json({ status: '2FA notification dispatched successfully' });
+  console.log('[MANUAL TEST] Dispatching test notification...');
+  await sendNtfyAlert('2FA Authentication Requested', 'Verification required to approve access.');
+  res.status(200).json({ status: '2FA notification sent successfully' });
 });
 
 /**
@@ -96,7 +105,7 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', uptime: process.uptime() });
 });
 
-// Start Server
+// Start Express Web Server
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
