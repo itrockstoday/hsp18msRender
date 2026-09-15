@@ -172,19 +172,21 @@ app.all('/verify-2fa', verifyTotpMiddleware, async (req, res) => {
 app.post('/notehub-webhook', async (req, res) => {
   console.log("Inbound Notehub Event Received:", JSON.stringify(req.body));
   
-  const payload = req.body.body || req.body;
-  const event = payload.event;
+  // Robust nested extraction for Notehub payload format
+  const payloadBody = req.body.body || req.body;
+  const event = payloadBody.event || req.body.event;
 
   if (!event) {
+    console.log("No valid event string found in payload body.");
     return res.status(200).json({ status: "ignored_no_event" });
   }
 
-  const rawLat = payload.lat || 0;
-  const rawLon = payload.lon || 0;
+  const rawLat = req.body.best_lat || req.body.where_lat || req.body.lat || payloadBody.lat || 0;
+  const rawLon = req.body.best_lon || req.body.where_lon || req.body.lon || payloadBody.lon || 0;
   
   const latStr = rawLat !== 0 ? rawLat.toFixed(6) : "No Lock Yet";
   const lonStr = rawLon !== 0 ? rawLon.toFixed(6) : "No Lock Yet";
-  const mode = payload.mode || "PARKED";
+  const mode = payloadBody.mode || "PARKED";
   const externalUrl = process.env.RENDER_EXTERNAL_URL || 'https://hsp18msrender.onrender.com';
 
   let alertTitle = "";
@@ -201,8 +203,8 @@ app.post('/notehub-webhook', async (req, res) => {
     includeButtons = false;
   } 
   else if (event === "parked_tilt_moved") {
-    const baseline = payload.baseline || "Unknown";
-    const current = payload.current || "Unknown";
+    const baseline = payloadBody.baseline || "Unknown";
+    const current = payloadBody.current || "Unknown";
     alertTitle = `⚠️ MOVEMENT DETECTED: TILT CHANGED`;
     alertMessage = `Motorcycle shifted from parked position!\nBaseline: ${baseline}\nCurrent: ${current}\nStatus: Awaiting 2FA (2 min window)`;
     priority = 4;
@@ -222,13 +224,13 @@ app.post('/notehub-webhook', async (req, res) => {
   } 
   else if (event === "geofence_warning_30mi") {
     alertTitle = `⚠️ 30-MILE GEOFENCE WARNING`;
-    alertMessage = `Borrower Notice: ${payload.distance ? payload.distance.toFixed(1) : 0} miles from Home Location.`;
+    alertMessage = `Borrower Notice: ${payloadBody.distance ? payloadBody.distance.toFixed(1) : 0} miles from Home Location.`;
     priority = 3;
     tags = ["warning", "compass"];
   }
   else if (event === "geofence_breach_40mi") {
     alertTitle = `⛔ 40-MILE GEOFENCE BREACH`;
-    alertMessage = `CRITICAL: Borrower exceeded 40-mile limit!\nDistance: ${payload.distance ? payload.distance.toFixed(1) : 0} miles.`;
+    alertMessage = `CRITICAL: Borrower exceeded 40-mile limit!\nDistance: ${payloadBody.distance ? payloadBody.distance.toFixed(1) : 0} miles.`;
     priority = 5;
     tags = ["no_entry_sign", "siren"];
   }

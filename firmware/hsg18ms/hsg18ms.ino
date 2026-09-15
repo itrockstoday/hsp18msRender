@@ -19,7 +19,7 @@ void setup() {
     serialNotecard.begin(115200);
     notecard.begin(serialNotecard);
 
-    // Configure Notecard to use continuous cellular connection for instant alerts
+    // 1. Configure continuous cellular sync connection
     J *req = notecard.newRequest("hub.set");
     if (req != NULL) {
         JAddStringToObject(req, "mode", "continuous");
@@ -27,7 +27,15 @@ void setup() {
         notecard.sendRequest(req);
     }
 
-    // Send boot location/online notice
+    // 2. Enable physical motion detection mode on Notecard accelerometer
+    J *motionReq = notecard.newRequest("card.motion.mode");
+    if (motionReq != NULL) {
+        JAddStringToObject(motionReq, "start", "true");
+        JAddNumberToObject(motionReq, "sensitivity", 2);
+        notecard.sendRequest(motionReq);
+    }
+
+    // 3. Send boot location/online notice
     sendBootEvent();
 }
 
@@ -62,8 +70,8 @@ void loop() {
 void triggerParkedTiltEvent(String baselineStr, String currentStr) {
     J *req = notecard.newRequest("note.add");
     if (req != NULL) {
-        JAddStringToObject(req, "file", "tilt.qi");
-        JAddBoolToObject(req, "sync", true); // INSTANT SYNC TO NOTEHUB AND WEBHOOK
+        JAddStringToObject(req, "file", "tilt.qo");
+        JAddBoolToObject(req, "sync", true);
 
         J *body = JCreateObject();
         JAddStringToObject(body, "event", "parked_tilt_moved");
@@ -80,11 +88,11 @@ void triggerParkedTiltEvent(String baselineStr, String currentStr) {
 
 void triggerBreachEvent() {
     isBreached = true;
-    tiltDetectedTime = 0; // Clear timer
+    tiltDetectedTime = 0;
 
     J *req = notecard.newRequest("note.add");
     if (req != NULL) {
-        JAddStringToObject(req, "file", "breach.qi");
+        JAddStringToObject(req, "file", "breach.qo");
         JAddBoolToObject(req, "sync", true);
 
         J *body = JCreateObject();
@@ -115,7 +123,6 @@ void monitorParkedTilt() {
                 baselineZ = z;
                 baselineSet = true;
             } else {
-                // Check if movement exceeds threshold delta
                 if (abs(x - baselineX) > 0.25 || abs(y - baselineY) > 0.25 || abs(z - baselineZ) > 0.25) {
                     String baseStr = String(baselineX) + "," + String(baselineY) + "," + String(baselineZ);
                     String currStr = String(x) + "," + String(y) + "," + String(z);
@@ -146,7 +153,7 @@ void checkInboundNotes() {
                     currentMode = newMode;
                     isBreached = false;
                     tiltDetectedTime = 0;
-                    baselineSet = false; // Reset baseline for next parked event
+                    baselineSet = false;
                     Serial.println("2FA DISARM VERIFIED VIA MCU: Mode set to " + newMode);
                 }
             }
@@ -190,7 +197,7 @@ void sendGpsTrackingUpdate() {
 
     J *noteReq = notecard.newRequest("note.add");
     if (noteReq != NULL) {
-        JAddStringToObject(noteReq, "file", "tracking.qi");
+        JAddStringToObject(noteReq, "file", "tracking.qo");
         JAddBoolToObject(noteReq, "sync", true);
 
         J *body = JCreateObject();
@@ -207,7 +214,7 @@ void sendGpsTrackingUpdate() {
 void sendBootEvent() {
     J *req = notecard.newRequest("note.add");
     if (req != NULL) {
-        JAddStringToObject(req, "file", "boot.qi");
+        JAddStringToObject(req, "file", "boot.qo");
         JAddBoolToObject(req, "sync", true);
 
         J *body = JCreateObject();
