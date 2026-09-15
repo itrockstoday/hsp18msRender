@@ -21,9 +21,11 @@ void setup() {
 
     // Configure Notecard to use continuous cellular connection for instant alerts
     J *req = notecard.newRequest("hub.set");
-    JAddStringToObject(req, "mode", "continuous");
-    JAddStringToObject(req, "sync", "true");
-    notecard.sendRequest(req);
+    if (req != NULL) {
+        JAddStringToObject(req, "mode", "continuous");
+        JAddBoolToObject(req, "sync", true);
+        notecard.sendRequest(req);
+    }
 
     // Send boot location/online notice
     sendBootEvent();
@@ -97,7 +99,9 @@ void triggerBreachEvent() {
 
 void monitorParkedTilt() {
     J *req = notecard.newRequest("card.motion");
-    J *rsp = notecard.sendRequestWithResponse(req);
+    if (req == NULL) return;
+
+    J *rsp = notecard.requestAndResponse(req);
 
     if (rsp != NULL) {
         if (JGetBool(rsp, "motion")) {
@@ -119,53 +123,69 @@ void monitorParkedTilt() {
                 }
             }
         }
+        notecard.deleteResponse(rsp);
     }
 }
 
 void checkInboundNotes() {
     J *req = notecard.newRequest("note.get");
+    if (req == NULL) return;
+
     JAddStringToObject(req, "file", "inbound.qi");
     JAddBoolToObject(req, "delete", true);
-    J *rsp = notecard.sendRequestWithResponse(req);
 
-    if (rsp != NULL && !NoteResponseError(rsp)) {
-        J *body = JGetObject(rsp, "body");
-        if (body != NULL) {
-            bool verified = JGetBool(body, "verified");
-            if (verified) {
-                String newMode = JGetString(body, "mode");
-                currentMode = newMode;
-                isBreached = false;
-                tiltDetectedTime = 0;
-                baselineSet = false; // Reset baseline for next parked event
-                Serial.println("2FA DISARM VERIFIED VIA MCU: Mode set to " + newMode);
+    J *rsp = notecard.requestAndResponse(req);
+
+    if (rsp != NULL) {
+        if (!NoteResponseError(rsp)) {
+            J *body = JGetObject(rsp, "body");
+            if (body != NULL) {
+                bool verified = JGetBool(body, "verified");
+                if (verified) {
+                    String newMode = JGetString(body, "mode");
+                    currentMode = newMode;
+                    isBreached = false;
+                    tiltDetectedTime = 0;
+                    baselineSet = false; // Reset baseline for next parked event
+                    Serial.println("2FA DISARM VERIFIED VIA MCU: Mode set to " + newMode);
+                }
             }
         }
+        notecard.deleteResponse(rsp);
     }
 }
 
 void fetchEnvironmentVariables() {
     J *req = notecard.newRequest("env.get");
-    J *rsp = notecard.sendRequestWithResponse(req);
-    if (rsp != NULL && !NoteResponseError(rsp)) {
-        J *env = JGetObject(rsp, "body");
-        if (env != NULL) {
-            const char* modeStr = JGetString(env, "app_mode");
-            if (modeStr != NULL && strlen(modeStr) > 0) {
-                currentMode = String(modeStr);
+    if (req == NULL) return;
+
+    J *rsp = notecard.requestAndResponse(req);
+
+    if (rsp != NULL) {
+        if (!NoteResponseError(rsp)) {
+            J *env = JGetObject(rsp, "body");
+            if (env != NULL) {
+                const char* modeStr = JGetString(env, "app_mode");
+                if (modeStr != NULL && strlen(modeStr) > 0) {
+                    currentMode = String(modeStr);
+                }
             }
         }
+        notecard.deleteResponse(rsp);
     }
 }
 
 void sendGpsTrackingUpdate() {
     J *req = notecard.newRequest("card.location");
-    J *rsp = notecard.sendRequestWithResponse(req);
-
     float lat = 0, lon = 0;
-    if (rsp != NULL) {
-        lat = JGetNumber(rsp, "lat");
-        lon = JGetNumber(rsp, "lon");
+
+    if (req != NULL) {
+        J *rsp = notecard.requestAndResponse(req);
+        if (rsp != NULL) {
+            lat = JGetNumber(rsp, "lat");
+            lon = JGetNumber(rsp, "lon");
+            notecard.deleteResponse(rsp);
+        }
     }
 
     J *noteReq = notecard.newRequest("note.add");
