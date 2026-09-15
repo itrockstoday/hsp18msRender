@@ -4,17 +4,17 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-// Load Environment Variables
+// Server Port & Your Specific ntfy Topic
 const PORT = process.env.PORT || 3000;
-const NTFY_TOPIC = process.env.NTFY_TOPIC || 'my_alerts';
+const NTFY_TOPIC = process.env.NTFY_TOPIC || 'hspg18ms_alerts_3486';
 
 /**
  * Sends a push notification to ntfy.sh
- * Properly formats JSON payload with action buttons and extracts raw topic name.
+ * Directs alerts to your topic: hspg18ms_alerts_3486
  */
 async function sendNtfyAlert(title, message, includeButton = true) {
   try {
-    // Clean topic name in case full URL was passed in process.env.NTFY_TOPIC
+    // Sanitize topic string in case full URL was passed in ENV
     const rawTopic = NTFY_TOPIC.replace(/^https?:\/\/ntfy\.sh\//i, '').trim();
 
     const payload = {
@@ -34,16 +34,16 @@ async function sendNtfyAlert(title, message, includeButton = true) {
       ];
     }
 
-    // Send payload directly to ntfy.sh
+    // Post notification directly to ntfy.sh
     const response = await axios.post('https://ntfy.sh', payload, {
       headers: { 
         'Content-Type': 'application/json' 
       }
     });
 
-    console.log(`[NTFY SUCCESS] Notification sent: "${title}" (Status: ${response.status})`);
+    console.log(`[NTFY SUCCESS] Sent to topic "${rawTopic}": "${title}" (Status: ${response.status})`);
   } catch (err) {
-    console.error('[NTFY ERROR] Dispatch failed:', err.response?.data || err.message);
+    console.error('[NTFY ERROR] Primary dispatch failed:', err.response?.data || err.message);
 
     // Fallback attempt without action buttons if primary request fails
     if (includeButton) {
@@ -55,12 +55,13 @@ async function sendNtfyAlert(title, message, includeButton = true) {
 
 /**
  * Shared Inbound Notehub Event Handler
+ * Supports both / and /notehub-webhook paths
  */
 async function handleNotehubEvent(req, res) {
   const event = req.body;
   console.log(`[NOTEHUB EVENT] Inbound Event: Path=${req.path}, File=${event.file}, Event=${event.body?.event || 'N/A'}`);
 
-  // Acknowledge Notehub immediately with 200 OK so it doesn't log routing errors
+  // Acknowledge Notehub immediately with 200 OK
   res.status(200).send({ status: 'received' });
 
   const file = event.file || '';
@@ -85,7 +86,7 @@ async function handleNotehubEvent(req, res) {
   }
 }
 
-// Support both / and /notehub-webhook endpoints to ensure Notehub never receives a 404
+// Support both root and /notehub-webhook endpoints
 app.post('/', handleNotehubEvent);
 app.post('/notehub-webhook', handleNotehubEvent);
 
