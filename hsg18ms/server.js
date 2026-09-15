@@ -2,7 +2,20 @@ const express = require('express');
 const axios = require('axios');
 
 const app = express();
+
+// Enable CORS so your Python web page can make fetch/XHR requests to Render
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Server Port & Your Specific ntfy Topic
 const PORT = process.env.PORT || 3000;
@@ -14,7 +27,6 @@ const NTFY_TOPIC = process.env.NTFY_TOPIC || 'hspg18ms_alerts_3486';
  */
 async function sendNtfyAlert(title, message, includeButton = true) {
   try {
-    // Sanitize topic string in case full URL was passed in ENV
     const rawTopic = NTFY_TOPIC.replace(/^https?:\/\/ntfy\.sh\//i, '').trim();
 
     const payload = {
@@ -34,7 +46,6 @@ async function sendNtfyAlert(title, message, includeButton = true) {
       ];
     }
 
-    // Post notification directly to ntfy.sh
     const response = await axios.post('https://ntfy.sh', payload, {
       headers: { 
         'Content-Type': 'application/json' 
@@ -45,7 +56,6 @@ async function sendNtfyAlert(title, message, includeButton = true) {
   } catch (err) {
     console.error('[NTFY ERROR] Primary dispatch failed:', err.response?.data || err.message);
 
-    // Fallback attempt without action buttons if primary request fails
     if (includeButton) {
       console.log('[NTFY RETRY] Retrying dispatch without action buttons...');
       await sendNtfyAlert(title, message, false);
@@ -61,13 +71,11 @@ async function handleNotehubEvent(req, res) {
   const event = req.body;
   console.log(`[NOTEHUB EVENT] Inbound Event: Path=${req.path}, File=${event.file}, Event=${event.body?.event || 'N/A'}`);
 
-  // Acknowledge Notehub immediately with 200 OK
   res.status(200).send({ status: 'received' });
 
   const file = event.file || '';
   const eventData = event.body || {};
 
-  // Process Notefile Types
   if (file === 'alerts.qo') {
     const alertType = eventData.event || 'Security / Motion Alert';
     const location = eventData.location || 'Parked Location';
@@ -77,7 +85,6 @@ async function handleNotehubEvent(req, res) {
   } else if (file === '_track.qo') {
     console.log('[TELEMETRY] Location tracking event received (_track.qo).');
     
-    // If park/power state is sent inside _track.qo, trigger notification
     if (eventData.event === 'parked' || eventData.status === 'power_on') {
       await sendNtfyAlert('Vehicle Parked / Power On', `Status update received from device.`);
     }
@@ -86,9 +93,24 @@ async function handleNotehubEvent(req, res) {
   }
 }
 
-// Support both root and /notehub-webhook endpoints
+// Notehub Webhook Routes
 app.post('/', handleNotehubEvent);
 app.post('/notehub-webhook', handleNotehubEvent);
+
+/**
+ * Endpoint to Receive 2FA Code/Pin from your Python Web Page
+ */
+const handle2FASubmission = async (req, res) => {
+  const pin = req.body?.pin || req.body?.code || req.body?.2fa || 'No PIN Provided';
+  console.log(`[2FA SUBMISSION] Received 2FA Code from Python Web Page: ${pin}`);
+
+  await sendNtfyAlert('🔑 2FA Verification Code', `Code Received: ${pin}`);
+
+  res.status(200).json({ status: 'success', message: '2FA PIN received and sent via ntfy' });
+};
+
+app.post('/verify-2fa', handle2FASubmission);
+app.post('/send-2fa', handle2FASubmission);
 
 /**
  * Manual Testing Endpoint
